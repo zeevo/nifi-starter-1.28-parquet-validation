@@ -66,8 +66,10 @@ brew install mise
 mise install          # reads mise.toml -> Temurin 11.0.31, Maven 3.9.16
 ```
 
-Java 11 matches what NiFi 1.28.1 is built against (`maven.compiler.release` is 11). Without
-mise, any JDK 11–21 and Maven 3.9+ work.
+NiFi 1.28.1's own poms default to Java 8 bytecode (its released `nifi-api` jar is class file
+major version 52) and bump to 11 under a JDK 11+ profile. This project pins
+`maven.compiler.release` to 11 explicitly rather than depending on profile activation.
+Without mise, any JDK 11–21 and Maven 3.9+ work.
 
 ## Build
 
