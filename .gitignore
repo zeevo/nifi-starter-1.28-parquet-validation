@@ -1,0 +1,23 @@
+target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# NARs staged for the local NiFi container
+nars/*.nar
+
+### IntelliJ IDEA ###
+.idea
+*.iml
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
