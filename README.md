@@ -1,7 +1,8 @@
 # nifi-starter
 
 A Maven monorepo for building Apache **NiFi 1.28.1** extensions: a controller service API,
-its implementation, custom processors, and the NAR that packages them.
+its implementation, custom processors, and the NAR that packages them. Every example exists
+in both **Java and Kotlin**.
 
 Scaffolded with the official NiFi archetypes (`nifi-processor-bundle-archetype` and
 `nifi-service-bundle-archetype`, both `1.28.1`), then merged into a single reactor.
@@ -13,8 +14,8 @@ nifi-starter/
 ├── mise.toml                  JDK 11 + Maven pinned for this repo
 ├── pom.xml                    standalone parent: versions, dependencyManagement, nar plugin
 ├── nifi-starter-api/          jar  — StarterService (ControllerService interface)
-├── nifi-starter-services/     jar  — StandardStarterService (implementation)
-├── nifi-starter-processors/   jar  — TransformContentProcessor
+├── nifi-starter-services/     jar  — StandardStarterService + KotlinStarterService
+├── nifi-starter-processors/   jar  — TransformContentProcessor + KotlinTransformProcessor
 ├── nifi-starter-nar/          nar  — bundles all three for deployment
 ├── docker-compose.yml         single-node NiFi 1.28.1 for local testing
 └── nars/                      staging dir mounted as NiFi's autoload directory
@@ -100,23 +101,52 @@ container restart.
 
 ## What the example code does
 
-| Class | Module | Role |
-|---|---|---|
-| `StarterService` | api | `String transform(String)` — the service contract |
-| `StandardStarterService` | services | Prefixes values, optionally upper-cases them |
-| `TransformContentProcessor` | processors | Reads content as text, transforms it via the service, writes it back |
+| Class | Lang | Module | Role |
+|---|---|---|---|
+| `StarterService` | Java | api | `String transform(String)` — the service contract |
+| `StandardStarterService` | Java | services | Prefixes values, optionally upper-cases them |
+| `KotlinStarterService` | Kotlin | services | Same behaviour, default prefix `kotlin-` |
+| `TransformContentProcessor` | Java | processors | Transforms content via the service |
+| `KotlinTransformProcessor` | Kotlin | processors | Same, writes `starter.kotlin.service.id` |
 
 Extensions are discovered through `META-INF/services/` files — `org.apache.nifi.processor.Processor`
 and `org.apache.nifi.controller.ControllerService`. **A new processor or service that isn't
-listed there will not appear in NiFi.**
+listed there will not appear in NiFi**, regardless of which language it's written in.
 
 Tests use `nifi-mock`'s `TestRunner`. Note that `nifi-starter-processors` tests against a
 stub service (`StubStarterService`) rather than depending on the implementation module, so
 the two stay decoupled.
 
+## Kotlin
+
+Kotlin is wired up in every module; a module simply needs a `src/main/kotlin` (or
+`src/test/kotlin`) directory. Mixed sources compile in one pass — `kotlin-maven-plugin` runs
+first and reads the Java sources for cross-references, then javac compiles the Java against
+the resulting class files. That ordering is why the root pom disables maven-compiler-plugin's
+`default-compile`/`default-testCompile` executions and re-adds them after the Kotlin plugin;
+within a phase, Maven runs plugins in declaration order.
+
+The two languages interoperate freely, and the examples deliberately demonstrate it:
+
+- `KotlinStarterService` implements the **Java** `StarterService` interface.
+- `KotlinTransformProcessor` accepts any `StarterService`, Java or Kotlin.
+- `KotlinTransformProcessorTest` (Kotlin) drives `StubStarterService` (Java).
+- `KotlinStarterServiceTest` (Kotlin) drives `ServiceTestProcessor` (Java).
+
+Two Kotlin specifics worth copying:
+
+- Property descriptors and relationships go in a `companion object` and are annotated
+  `@JvmField`, so they are real static fields — what NiFi's reflection and Java callers
+  expect. Without `@JvmField` they become getters on a `Companion` object.
+- `kotlin-stdlib` is a normal compile dependency and is bundled into the NAR
+  (`kotlin-stdlib-2.4.10.jar`), because NiFi ships no Kotlin runtime of its own.
+
+`jvmTarget` follows `maven.compiler.release`, so Kotlin and Java both emit Java 11 bytecode.
+
 ## Adding a processor
 
-1. Create the class in `nifi-starter-processors`, extending `AbstractProcessor`.
+1. Create the class in `nifi-starter-processors/src/main/{java,kotlin}`, extending
+   `AbstractProcessor`.
 2. Add its fully-qualified name to
    `nifi-starter-processors/src/main/resources/META-INF/services/org.apache.nifi.processor.Processor`.
 3. Add a `TestRunner` test.
@@ -125,7 +155,8 @@ the two stay decoupled.
 ## Adding a controller service
 
 1. Put the interface in `nifi-starter-api`, extending `ControllerService`.
-2. Implement it in `nifi-starter-services`, extending `AbstractControllerService`.
+2. Implement it in `nifi-starter-services/src/main/{java,kotlin}`, extending
+   `AbstractControllerService`.
 3. Add the implementation's FQN to
    `nifi-starter-services/src/main/resources/META-INF/services/org.apache.nifi.controller.ControllerService`.
 4. `mvn clean install`.

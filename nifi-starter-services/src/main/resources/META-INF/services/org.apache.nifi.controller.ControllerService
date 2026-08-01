@@ -1,1 +1,2 @@
 org.example.nifi.services.StandardStarterService
+org.example.nifi.services.KotlinStarterService

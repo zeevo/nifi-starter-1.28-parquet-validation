@@ -23,6 +23,8 @@
         <nifi.version>1.28.1</nifi.version>
         <nifi.nar.maven.plugin.version>1.5.1</nifi.nar.maven.plugin.version>
 
+        <kotlin.version>2.4.10</kotlin.version>
+
         <junit.version>5.11.1</junit.version>
         <slf4j.version>2.0.16</slf4j.version>
 
@@ -100,6 +102,13 @@
                 <version>${slf4j.version}</version>
                 <scope>test</scope>
             </dependency>
+
+            <!-- Bundled into the NAR: NiFi does not ship a Kotlin runtime -->
+            <dependency>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-stdlib</artifactId>
+                <version>${kotlin.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -111,6 +120,80 @@
                 <artifactId>nifi-nar-maven-plugin</artifactId>
                 <version>${nifi.nar.maven.plugin.version}</version>
                 <extensions>true</extensions>
+            </plugin>
+
+            <!--
+              Mixed Java/Kotlin compilation. kotlin-maven-plugin must be declared before
+              maven-compiler-plugin: both bind to the compile phase, and within a phase
+              Maven runs plugins in declaration order. Kotlin compiles first (reading the
+              Java sources for cross-references), then javac compiles the Java sources
+              against the resulting class files.
+            -->
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <configuration>
+                    <jvmTarget>${maven.compiler.release}</jvmTarget>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirs>
+                                <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
+                                <sourceDir>${project.basedir}/src/main/java</sourceDir>
+                            </sourceDirs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>test-compile</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirs>
+                                <sourceDir>${project.basedir}/src/test/kotlin</sourceDir>
+                                <sourceDir>${project.basedir}/src/test/java</sourceDir>
+                            </sourceDirs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Default compile executions are disabled so Kotlin runs first -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <phase>none</phase>
+                    </execution>
+                    <execution>
+                        <id>java-compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>java-test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
         <pluginManagement>
