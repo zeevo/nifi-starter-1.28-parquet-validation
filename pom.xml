@@ -23,6 +23,16 @@
         <nifi.version>1.28.1</nifi.version>
         <nifi.nar.maven.plugin.version>1.5.1</nifi.nar.maven.plugin.version>
 
+        <!-- Parquet/Hadoop versions mirror what NiFi 1.28.1's own parquet bundle uses -->
+        <parquet.version>1.13.1</parquet.version>
+        <hadoop.version>3.4.1</hadoop.version>
+        <!--
+          hadoop-common drags in avro 1.9.2 and a mismatched jackson pair, which breaks
+          parquet-avro on the test classpath. Pin the versions NiFi 1.28.1 manages.
+        -->
+        <avro.version>1.11.4</avro.version>
+        <jackson.version>2.16.2</jackson.version>
+
         <kotlin.version>2.4.10</kotlin.version>
 
         <junit.version>5.11.1</junit.version>
@@ -94,6 +104,88 @@
                 <artifactId>nifi-standard-services-api-nar</artifactId>
                 <version>${nifi.version}</version>
                 <type>nar</type>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-hadoop-libraries-nar</artifactId>
+                <version>${nifi.version}</version>
+                <type>nar</type>
+            </dependency>
+
+            <!--
+              Parquet. Bundled into the NAR; snappy-java is excluded because the
+              nifi-hadoop-libraries-nar parent provides it at runtime (mirroring
+              NiFi's own parquet bundle, which excludes it to avoid version clashes).
+            -->
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-hadoop</artifactId>
+                <version>${parquet.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.xerial.snappy</groupId>
+                        <artifactId>snappy-java</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-avro</artifactId>
+                <version>${parquet.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.xerial.snappy</groupId>
+                        <artifactId>snappy-java</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <!--
+              provided: the nifi-hadoop-libraries-nar parent NAR supplies the Hadoop client libraries
+              at runtime, so hadoop must not be bundled. Still on the test classpath.
+            -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-client</artifactId>
+                <version>${hadoop.version}</version>
+                <scope>provided</scope>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-log4j12</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>ch.qos.reload4j</groupId>
+                        <artifactId>reload4j</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>log4j</groupId>
+                        <artifactId>log4j</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>

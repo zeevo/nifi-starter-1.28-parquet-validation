@@ -15,14 +15,17 @@
 
     <dependencies>
         <!--
-          Parent NAR. Not required by the current code, but it puts NiFi's standard
-          service APIs (SSLContextService, DBCPService, RecordReaderFactory, ...) on the
-          parent classloader, so a processor here can reference them later.
+          Parent NAR. Supplies the Hadoop client libraries that ValidateParquet's
+          parquet-hadoop dependency needs at runtime (hadoop-* jars are provided scope
+          here, so they are not bundled). Its own parent chain runs through
+          nifi-standard-shared-nar to nifi-standard-services-api-nar, so NiFi's standard
+          service APIs (SSLContextService, DBCPService, RecordReaderFactory, ...) remain
+          on the parent classloader as before.
           A NAR may declare at most one nar-typed dependency.
         -->
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-standard-services-api-nar</artifactId>
+            <artifactId>nifi-hadoop-libraries-nar</artifactId>
             <type>nar</type>
         </dependency>
         <!-- nifi-starter-api is bundled transitively via these two -->

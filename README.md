@@ -15,7 +15,7 @@ nifi-starter/
 ├── pom.xml                    standalone parent: versions, dependencyManagement, nar plugin
 ├── nifi-starter-api/          jar  — StarterService (ControllerService interface)
 ├── nifi-starter-services/     jar  — StandardStarterService + KotlinStarterService
-├── nifi-starter-processors/   jar  — TransformContentProcessor + KotlinTransformProcessor
+├── nifi-starter-processors/   jar  — TransformContentProcessor, KotlinTransformProcessor, ValidateParquet
 ├── nifi-starter-nar/          nar  — bundles all three for deployment
 ├── docker-compose.yml         single-node NiFi 1.28.1 for local testing
 └── nars/                      staging dir mounted as NiFi's autoload directory
@@ -27,14 +27,18 @@ layering. The jar/NAR distinction is orthogonal: modules are *compile* units, a 
 
 ```
 nifi-starter-nar  (api + services + processors)
-      └── parent: nifi-standard-services-api-nar  (NiFi's standard service APIs)
+      └── parent: nifi-hadoop-libraries-nar  (Hadoop client libraries)
+            └── parent: nifi-standard-shared-nar
+                  └── parent: nifi-standard-services-api-nar  (NiFi's standard service APIs)
 ```
 
 The parent link is a single `<type>nar</type>` dependency, written to the manifest as
-`Nar-Dependency-Id`. A NAR may declare **at most one** NAR dependency. This project doesn't
-currently use NiFi's standard services, but naming that NAR as the parent means a processor
-here can reference `SSLContextService`, `DBCPService`, `RecordReaderFactory` and friends
-without restructuring.
+`Nar-Dependency-Id`. A NAR may declare **at most one** NAR dependency, but parent NARs
+chain: `nifi-hadoop-libraries-nar` supplies the Hadoop client jars that `ValidateParquet`'s
+`parquet-hadoop` dependency needs at runtime (declared `provided` here, so never bundled),
+and its own ancestry keeps `SSLContextService`, `DBCPService`, `RecordReaderFactory` and
+friends on the classloader chain too. This mirrors how NiFi's own `nifi-parquet-nar` is
+wired.
 
 ### When you'd need a separate API NAR
 
@@ -108,6 +112,34 @@ container restart.
 | `KotlinStarterService` | Kotlin | services | Same behaviour, default prefix `kotlin-` |
 | `TransformContentProcessor` | Java | processors | Transforms content via the service |
 | `KotlinTransformProcessor` | Kotlin | processors | Same, writes `starter.kotlin.service.id` |
+| `ValidateParquet` | Java | processors | Routes FlowFiles by conformance to an expected Parquet schema |
+
+### ValidateParquet
+
+Validates FlowFile content against a known Parquet schema, given in Parquet message type
+syntax (e.g. `message event { required int64 id; optional binary name (STRING); }`).
+Conforming files route to `valid` (with a `record.count` attribute), everything else to
+`invalid` (with the reason in `parquet.validation.detail`). Content is never modified.
+
+- **Schema Attribute Name** (optional): a FlowFile attribute carrying its own expected
+  schema, in the same syntax. When set and the attribute is present, that schema is used
+  for that FlowFile; when the attribute is missing or blank, `Parquet Schema` is the
+  fallback. An attribute that is present but malformed routes to `invalid` rather than
+  falling back, so a broken schema is never mistaken for an absent one.
+- **Schema Match Mode**: `Exact` (same columns, order, types, repetition) or `Contains`
+  (file must contain every expected column; extras allowed). The top-level message name is
+  ignored in both modes, since producers name it inconsistently (`spark_schema`, `root`,
+  the Avro record name, ...).
+- **Validation Depth**: `Schema and Content` (default) additionally decompresses and
+  decodes every row, verifying page checksums, which catches data-page corruption that a
+  footer check cannot see. `Schema Only` reads just the footer, which is orders of
+  magnitude faster on large files.
+
+Parquet reads a row group at a time, so memory for deep validation tracks row-group size
+(commonly up to 128 MB), not file size. All parsing and decoding is upstream
+`parquet-hadoop` (the same parquet-mr library NiFi's own parquet bundle uses); the only
+custom I/O is a small `InputFile` adapter over the FlowFile stream, modeled on NiFi's
+`NifiParquetInputFile`.
 
 Extensions are discovered through `META-INF/services/` files — `org.apache.nifi.processor.Processor`
 and `org.apache.nifi.controller.ControllerService`. **A new processor or service that isn't
