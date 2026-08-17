@@ -56,8 +56,9 @@ import org.apache.parquet.schema.MessageType;
 @Tags({"parquet", "validate", "avro", "record"})
 @CapabilityDescription("Validates a Parquet file carried as FlowFile content. The schema must "
         + "contain the fields id, name and status, and every record must satisfy a fixed set of "
-        + "rules: id present and positive, at least one of name and status present, name not "
-        + "blank when present, and status one of ACTIVE, INACTIVE or PENDING when present. "
+        + "rules: id present, numeric and positive; at least one of name and status present; name "
+        + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. The "
+        + "rules are compiled in and are not configurable, so this processor has no properties. "
         + "Content is never modified. Note that the whole FlowFile is buffered in memory, because "
         + "Parquet keeps its footer at the end of the file while NiFi content streams are "
         + "forward-only.")
@@ -66,25 +67,22 @@ import org.apache.parquet.schema.MessageType;
 @SupportsBatching
 @WritesAttributes({
         @WritesAttribute(attribute = ValidateParquet.RECORD_COUNT_ATTRIBUTE,
-                description = "Number of records read from the file"),
+                description = "Number of records read from the file. Not written when the schema "
+                        + "check failed or the content was unreadable, since no records were "
+                        + "decoded in those cases."),
         @WritesAttribute(attribute = ValidateParquet.INVALID_COUNT_ATTRIBUTE,
-                description = "Number of records that failed validation"),
+                description = "Number of records that broke at least one rule. Accurate for the "
+                        + "whole file even though only the first few are described."),
         @WritesAttribute(attribute = ValidateParquet.VIOLATIONS_ATTRIBUTE,
                 description = "Why the file was rejected. Record-level violations are listed as "
-                        + "'row N: reason', capped at the first 10 with a count of the remainder")
+                        + "'row N: reason', capped at the first 10 with a count of the remainder. "
+                        + "Written on the invalid relationship only.")
 })
 public class ValidateParquet extends AbstractProcessor {
 
     static final String RECORD_COUNT_ATTRIBUTE = "parquet.validation.record.count";
     static final String INVALID_COUNT_ATTRIBUTE = "parquet.validation.invalid.count";
     static final String VIOLATIONS_ATTRIBUTE = "parquet.validation.violations";
-
-    private static final String ID_FIELD = "id";
-    private static final String NAME_FIELD = "name";
-    private static final String STATUS_FIELD = "status";
-
-    private static final List<String> REQUIRED_FIELDS =
-            Collections.unmodifiableList(Arrays.asList(ID_FIELD, NAME_FIELD, STATUS_FIELD));
 
     private static final Set<String> ALLOWED_STATUSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList("ACTIVE", "INACTIVE", "PENDING")));
@@ -97,11 +95,11 @@ public class ValidateParquet extends AbstractProcessor {
     private static final long MAX_IN_MEMORY_BYTES = 256L * 1024 * 1024;
 
     /** Keeps the violations attribute bounded on a file where every row is bad. */
-    private static final int MAX_REPORTED_VIOLATIONS = 10;
+    static final int MAX_REPORTED_VIOLATIONS = 10;
 
     public static final Relationship REL_VALID = new Relationship.Builder()
             .name("valid")
-            .description("Parquet files whose schema and records all passed validation")
+            .description("Parquet files whose schema and every record passed validation")
             .build();
 
     public static final Relationship REL_INVALID = new Relationship.Builder()
@@ -148,10 +146,10 @@ public class ValidateParquet extends AbstractProcessor {
             } catch (final IOException | RuntimeException e) {
                 // parquet-java reports "this is not a Parquet file" with a bare RuntimeException
                 // rather than a typed one, so this catch has to stay broad. Unreadable content is
-                // a data problem, which the user asked to route to invalid rather than failure.
+                // a data problem, which belongs on invalid rather than failure.
                 getLogger().debug("{} could not be read as Parquet", new Object[] {flowFile}, e);
                 flowFile = session.putAttribute(flowFile, VIOLATIONS_ATTRIBUTE,
-                        "not a readable Parquet file: " + e.getMessage());
+                        "not a readable Parquet file: " + describe(e));
                 session.transfer(flowFile, REL_INVALID);
                 return;
             }
@@ -183,7 +181,7 @@ public class ValidateParquet extends AbstractProcessor {
         final MessageType schema = readSchema(inputFile);
 
         final List<String> missing = new ArrayList<>();
-        for (final String field : REQUIRED_FIELDS) {
+        for (final String field : ParquetRow.FIELDS) {
             // containsField is case sensitive and matches top-level fields only, which is what we
             // want. It also has to come before any getType call, which throws on unknown names.
             if (!schema.containsField(field)) {
@@ -191,6 +189,9 @@ public class ValidateParquet extends AbstractProcessor {
             }
         }
         if (!missing.isEmpty()) {
+            // This gate is load-bearing, not just an optimization: GenericData.Record.get throws
+            // AvroRuntimeException for a field the schema does not declare, so the rules below
+            // must never run against a schema that is missing one.
             return ValidationResult.missingFields(missing);
         }
 
@@ -208,7 +209,7 @@ public class ValidateParquet extends AbstractProcessor {
             GenericRecord record;
             while ((record = reader.read()) != null) {
                 recordCount++;
-                final String violation = validateRecord(record);
+                final String violation = validateRecord(ParquetRow.from(record));
                 if (violation != null) {
                     invalidCount++;
                     // Keep counting past the cap so invalid.count stays accurate.
@@ -230,40 +231,38 @@ public class ValidateParquet extends AbstractProcessor {
         }
     }
 
-    /** @return the first rule the record breaks, or null if it passes */
-    private static String validateRecord(final GenericRecord record) {
-        final Object rawId = record.get(ID_FIELD);
-        final String name = text(record, NAME_FIELD);
-        final String status = text(record, STATUS_FIELD);
-
-        if (rawId == null) {
-            return "id is null";
-        }
-        if (!(rawId instanceof Number)) {
+    /**
+     * The business rules, hardcoded on purpose.
+     *
+     * @return the first rule the row breaks, or null if it passes
+     */
+    private static String validateRecord(final ParquetRow row) {
+        if (row.idNonNumeric()) {
+            // A string or binary id column would otherwise look like a null id. Calling it out
+            // separately keeps a schema problem from being reported as a missing value.
             return "id is not numeric";
         }
-        if (((Number) rawId).longValue() <= 0) {
+        if (row.id() == null) {
+            return "id is null";
+        }
+        if (row.id() <= 0) {
             return "id must be positive";
         }
-        if (name == null && status == null) {
+        if (row.name() == null && row.status() == null) {
             return "name and status are both null";
         }
-        if (name != null && name.trim().isEmpty()) {
+        if (row.name() != null && row.name().trim().isEmpty()) {
             return "name is blank";
         }
-        if (status != null && !ALLOWED_STATUSES.contains(status)) {
-            return "status '" + status + "' is not an allowed value";
+        if (row.status() != null && !ALLOWED_STATUSES.contains(row.status())) {
+            return "status '" + row.status() + "' is not an allowed value";
         }
         return null;
     }
 
-    /**
-     * Avro hands back Utf8 rather than String unless the writer set avro.java.string, which files
-     * from Spark, pyarrow and DuckDB do not, so casting to String would fail on most real files.
-     */
-    private static String text(final GenericRecord record, final String field) {
-        final Object value = record.get(field);
-        return value == null ? null : value.toString();
+    /** Some parquet failures carry no message, in which case the type name is all we have. */
+    private static String describe(final Exception e) {
+        return e.getMessage() == null ? e.toString() : e.getMessage();
     }
 
     private static final class ValidationResult {
@@ -278,10 +277,8 @@ public class ValidateParquet extends AbstractProcessor {
 
         /** No records are read in this case, so no counts are reported. */
         static ValidationResult missingFields(final List<String> missing) {
-            final Map<String, String> attributes = new HashMap<>();
-            attributes.put(VIOLATIONS_ATTRIBUTE,
-                    "schema is missing required field(s): " + String.join(", ", missing));
-            return new ValidationResult(false, attributes);
+            return new ValidationResult(false, Collections.singletonMap(VIOLATIONS_ATTRIBUTE,
+                    "schema is missing required field(s): " + String.join(", ", missing)));
         }
 
         static ValidationResult of(final long recordCount, final long invalidCount,
@@ -302,5 +299,4 @@ public class ValidateParquet extends AbstractProcessor {
             return new ValidationResult(invalidCount == 0, attributes);
         }
     }
-
 }
