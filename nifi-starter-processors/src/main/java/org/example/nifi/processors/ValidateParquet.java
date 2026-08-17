@@ -181,7 +181,7 @@ public class ValidateParquet extends AbstractProcessor {
         final MessageType schema = readSchema(inputFile);
 
         final List<String> missing = new ArrayList<>();
-        for (final String field : ParquetRow.FIELDS) {
+        for (final String field : Item.FIELDS) {
             // containsField is case sensitive and matches top-level fields only, which is what we
             // want. It also has to come before any getType call, which throws on unknown names.
             if (!schema.containsField(field)) {
@@ -209,7 +209,7 @@ public class ValidateParquet extends AbstractProcessor {
             GenericRecord record;
             while ((record = reader.read()) != null) {
                 recordCount++;
-                final String violation = validateRecord(ParquetRow.from(record));
+                final String violation = validateItem(Item.from(record));
                 if (violation != null) {
                     invalidCount++;
                     // Keep counting past the cap so invalid.count stays accurate.
@@ -234,28 +234,28 @@ public class ValidateParquet extends AbstractProcessor {
     /**
      * The business rules, hardcoded on purpose.
      *
-     * @return the first rule the row breaks, or null if it passes
+     * @return the first rule the item breaks, or null if it passes
      */
-    private static String validateRecord(final ParquetRow row) {
-        if (row.idNonNumeric()) {
+    private static String validateItem(final Item item) {
+        if (item.idNonNumeric()) {
             // A string or binary id column would otherwise look like a null id. Calling it out
             // separately keeps a schema problem from being reported as a missing value.
             return "id is not numeric";
         }
-        if (row.id() == null) {
+        if (item.id() == null) {
             return "id is null";
         }
-        if (row.id() <= 0) {
+        if (item.id() <= 0) {
             return "id must be positive";
         }
-        if (row.name() == null && row.status() == null) {
+        if (item.name() == null && item.status() == null) {
             return "name and status are both null";
         }
-        if (row.name() != null && row.name().trim().isEmpty()) {
+        if (item.name() != null && item.name().trim().isEmpty()) {
             return "name is blank";
         }
-        if (row.status() != null && !ALLOWED_STATUSES.contains(row.status())) {
-            return "status '" + row.status() + "' is not an allowed value";
+        if (item.status() != null && !ALLOWED_STATUSES.contains(item.status())) {
+            return "status '" + item.status() + "' is not an allowed value";
         }
         return null;
     }
