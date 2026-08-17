@@ -50,6 +50,7 @@ import org.junit.jupiter.api.Test;
  *   invalid-string-id.parquet      id column typed string: ("abc","bob","ACTIVE")
  *   invalid-many.parquet           20 rows, 1 to 5 pass, 6 to 20 have id 0
  *   missing-status-column.parquet  schema is id and name only
+ *   multi-row-group.parquet        2000 valid rows spread over 161 row groups
  */
 public class ValidateParquetTest {
 
@@ -91,6 +92,19 @@ public class ValidateParquetTest {
         final MockFlowFile out = runFixture("empty.parquet", ValidateParquet.REL_VALID);
 
         assertEquals("0", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("0", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+    }
+
+    /**
+     * 161 row groups over 2000 rows, so parquet seeks repeatedly while reading. This is the guard
+     * on FlowFileInputFile's rewind-by-reopening logic, which a single row group file barely
+     * touches: it reads the footer at the end, then has to get back to the first row group.
+     */
+    @Test
+    public void testFileWithManyRowGroupsIsValid() throws IOException {
+        final MockFlowFile out = runFixture("multi-row-group.parquet", ValidateParquet.REL_VALID);
+
+        assertEquals("2000", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
         assertEquals("0", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
     }
 

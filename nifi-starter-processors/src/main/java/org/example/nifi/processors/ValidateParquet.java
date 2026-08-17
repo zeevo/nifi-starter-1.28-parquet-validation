@@ -17,7 +17,6 @@
 package org.example.nifi.processors;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -38,12 +37,10 @@ import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.conf.ParquetConfiguration;
@@ -59,9 +56,8 @@ import org.apache.parquet.schema.MessageType;
         + "rules: id present, numeric and positive; at least one of name and status present; name "
         + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. The "
         + "rules are compiled in and are not configurable, so this processor has no properties. "
-        + "Content is never modified. Note that the whole FlowFile is buffered in memory, because "
-        + "Parquet keeps its footer at the end of the file while NiFi content streams are "
-        + "forward-only.")
+        + "Content is never modified, and is read straight from the content repository rather "
+        + "than buffered, so memory use does not grow with the size of the file.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -87,13 +83,6 @@ public class ValidateParquet extends AbstractProcessor {
     private static final Set<String> ALLOWED_STATUSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList("ACTIVE", "INACTIVE", "PENDING")));
 
-    /**
-     * Ceiling on how much content will be buffered. Not configurable by design; raise it here if
-     * larger files are expected. A guard is mandatory rather than merely prudent, since anything
-     * at or above 2 GiB would also overflow the int cast on the array length.
-     */
-    private static final long MAX_IN_MEMORY_BYTES = 256L * 1024 * 1024;
-
     /** Keeps the violations attribute bounded on a file where every row is bad. */
     static final int MAX_REPORTED_VIOLATIONS = 10;
 
@@ -111,7 +100,7 @@ public class ValidateParquet extends AbstractProcessor {
     public static final Relationship REL_FAILURE = new Relationship.Builder()
             .name("failure")
             .description("FlowFiles that could not be validated because of an unexpected error, "
-                    + "such as content that could not be read or is too large to buffer")
+                    + "such as content that could not be read from the repository")
             .build();
 
     private static final Set<Relationship> RELATIONSHIPS =
@@ -136,9 +125,7 @@ public class ValidateParquet extends AbstractProcessor {
         }
 
         try {
-            final byte[] content = readContent(session, flowFile);
-            final InputFile inputFile =
-                    new ByteArrayInputFile(content, flowFile.getAttribute(CoreAttributes.UUID.key()));
+            final InputFile inputFile = new FlowFileInputFile(session, flowFile);
 
             final ValidationResult result;
             try {
@@ -160,21 +147,6 @@ public class ValidateParquet extends AbstractProcessor {
             getLogger().error("Failed to validate {}", new Object[] {flowFile}, e);
             session.transfer(session.penalize(flowFile), REL_FAILURE);
         }
-    }
-
-    private byte[] readContent(final ProcessSession session, final FlowFile flowFile) throws IOException {
-        final long size = flowFile.getSize();
-        if (size > MAX_IN_MEMORY_BYTES) {
-            throw new IOException("Content is " + size + " bytes, above the " + MAX_IN_MEMORY_BYTES
-                    + " byte ceiling for in-memory Parquet validation");
-        }
-
-        // getSize is exact, so this is a single right-sized allocation.
-        final byte[] content = new byte[(int) size];
-        try (InputStream in = session.read(flowFile)) {
-            StreamUtils.fillBuffer(in, content, true);
-        }
-        return content;
     }
 
     private ValidationResult validate(final InputFile inputFile) throws IOException {
