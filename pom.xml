@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements. See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License. You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
@@ -23,20 +37,22 @@
         <nifi.version>1.28.1</nifi.version>
         <nifi.nar.maven.plugin.version>1.5.1</nifi.nar.maven.plugin.version>
 
-        <!-- Parquet/Hadoop versions mirror what NiFi 1.28.1's own parquet bundle uses -->
-        <parquet.version>1.13.1</parquet.version>
-        <hadoop.version>3.4.1</hadoop.version>
-        <!--
-          hadoop-common drags in avro 1.9.2 and a mismatched jackson pair, which breaks
-          parquet-avro on the test classpath. Pin the versions NiFi 1.28.1 manages.
-        -->
-        <avro.version>1.11.4</avro.version>
-        <jackson.version>2.16.2</jackson.version>
-
-        <kotlin.version>2.4.10</kotlin.version>
-
         <junit.version>5.11.1</junit.version>
         <slf4j.version>2.0.16</slf4j.version>
+
+        <!--
+          Parquet 1.17.1 rather than the 1.13.1 NiFi 1.28.1's own parquet bundle ships:
+          parquet-avro at or below 1.15.0 carries CVE-2025-30065 (schema parsing can load
+          arbitrary classes). 1.17.1 also targets Java 11, matching this build.
+        -->
+        <parquet.version>1.17.1</parquet.version>
+        <avro.version>1.11.5</avro.version>
+        <hadoop.version>3.4.1</hadoop.version>
+        <hadoop.thirdparty.version>1.3.0</hadoop.thirdparty.version>
+        <woodstox.version>5.4.0</woodstox.version>
+        <stax2.version>4.2.1</stax2.version>
+        <commons.collections.version>3.2.2</commons.collections.version>
+        <commons.lang3.version>3.17.0</commons.lang3.version>
 
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
@@ -105,88 +121,6 @@
                 <version>${nifi.version}</version>
                 <type>nar</type>
             </dependency>
-            <dependency>
-                <groupId>org.apache.nifi</groupId>
-                <artifactId>nifi-hadoop-libraries-nar</artifactId>
-                <version>${nifi.version}</version>
-                <type>nar</type>
-            </dependency>
-
-            <!--
-              Parquet. Bundled into the NAR; snappy-java is excluded because the
-              nifi-hadoop-libraries-nar parent provides it at runtime (mirroring
-              NiFi's own parquet bundle, which excludes it to avoid version clashes).
-            -->
-            <dependency>
-                <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-hadoop</artifactId>
-                <version>${parquet.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.xerial.snappy</groupId>
-                        <artifactId>snappy-java</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-avro</artifactId>
-                <version>${parquet.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.xerial.snappy</groupId>
-                        <artifactId>snappy-java</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.avro</groupId>
-                <artifactId>avro</artifactId>
-                <version>${avro.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
-                <artifactId>jackson-core</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
-                <artifactId>jackson-databind</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
-                <artifactId>jackson-annotations</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <!--
-              provided: the nifi-hadoop-libraries-nar parent NAR supplies the Hadoop client libraries
-              at runtime, so hadoop must not be bundled. Still on the test classpath.
-            -->
-            <dependency>
-                <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-client</artifactId>
-                <version>${hadoop.version}</version>
-                <scope>provided</scope>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.slf4j</groupId>
-                        <artifactId>slf4j-reload4j</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <groupId>org.slf4j</groupId>
-                        <artifactId>slf4j-log4j12</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <groupId>ch.qos.reload4j</groupId>
-                        <artifactId>reload4j</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <groupId>log4j</groupId>
-                        <artifactId>log4j</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
 
             <dependency>
                 <groupId>org.slf4j</groupId>
@@ -194,12 +128,95 @@
                 <version>${slf4j.version}</version>
                 <scope>test</scope>
             </dependency>
-
-            <!-- Bundled into the NAR: NiFi does not ship a Kotlin runtime -->
+            <!--
+              provided for the same reason as nifi-api: NiFi supplies slf4j-api from its own
+              lib/ directory. Parquet, Avro and Hadoop all pull it at compile scope, so without
+              this it would be bundled into the NAR and defeat NiFi's logging routing.
+            -->
             <dependency>
-                <groupId>org.jetbrains.kotlin</groupId>
-                <artifactId>kotlin-stdlib</artifactId>
-                <version>${kotlin.version}</version>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- Parquet -->
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-avro</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-hadoop</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-column</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-common</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+
+            <!--
+              Hadoop is not optional even though we never touch a filesystem. parquet-hadoop's
+              ParquetReadOptions.Builder calls HadoopCodecs.newFactory (needs
+              org.apache.hadoop.conf.Configuration and the io.compress codecs) and a static method
+              on ParquetInputFormat, which extends org.apache.hadoop.mapreduce.lib.input
+              .FileInputFormat, so loading it forces superclass resolution. That is why
+              hadoop-mapreduce-client-core is here alongside hadoop-common.
+
+              Both are pulled with wildcard exclusions in nifi-starter-processors and the handful
+              of leaves the import graph actually touches are re-added individually.
+            -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-common</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-mapreduce-client-core</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-annotations</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop.thirdparty</groupId>
+                <artifactId>hadoop-shaded-guava</artifactId>
+                <version>${hadoop.thirdparty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.woodstox</groupId>
+                <artifactId>woodstox-core</artifactId>
+                <version>${woodstox.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.codehaus.woodstox</groupId>
+                <artifactId>stax2-api</artifactId>
+                <version>${stax2.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-collections</groupId>
+                <artifactId>commons-collections</artifactId>
+                <version>${commons.collections.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>${commons.lang3.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -212,80 +229,6 @@
                 <artifactId>nifi-nar-maven-plugin</artifactId>
                 <version>${nifi.nar.maven.plugin.version}</version>
                 <extensions>true</extensions>
-            </plugin>
-
-            <!--
-              Mixed Java/Kotlin compilation. kotlin-maven-plugin must be declared before
-              maven-compiler-plugin: both bind to the compile phase, and within a phase
-              Maven runs plugins in declaration order. Kotlin compiles first (reading the
-              Java sources for cross-references), then javac compiles the Java sources
-              against the resulting class files.
-            -->
-            <plugin>
-                <groupId>org.jetbrains.kotlin</groupId>
-                <artifactId>kotlin-maven-plugin</artifactId>
-                <version>${kotlin.version}</version>
-                <configuration>
-                    <jvmTarget>${maven.compiler.release}</jvmTarget>
-                </configuration>
-                <executions>
-                    <execution>
-                        <id>compile</id>
-                        <phase>compile</phase>
-                        <goals>
-                            <goal>compile</goal>
-                        </goals>
-                        <configuration>
-                            <sourceDirs>
-                                <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
-                                <sourceDir>${project.basedir}/src/main/java</sourceDir>
-                            </sourceDirs>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>test-compile</id>
-                        <phase>test-compile</phase>
-                        <goals>
-                            <goal>test-compile</goal>
-                        </goals>
-                        <configuration>
-                            <sourceDirs>
-                                <sourceDir>${project.basedir}/src/test/kotlin</sourceDir>
-                                <sourceDir>${project.basedir}/src/test/java</sourceDir>
-                            </sourceDirs>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-
-            <!-- Default compile executions are disabled so Kotlin runs first -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>default-compile</id>
-                        <phase>none</phase>
-                    </execution>
-                    <execution>
-                        <id>default-testCompile</id>
-                        <phase>none</phase>
-                    </execution>
-                    <execution>
-                        <id>java-compile</id>
-                        <phase>compile</phase>
-                        <goals>
-                            <goal>compile</goal>
-                        </goals>
-                    </execution>
-                    <execution>
-                        <id>java-test-compile</id>
-                        <phase>test-compile</phase>
-                        <goals>
-                            <goal>testCompile</goal>
-                        </goals>
-                    </execution>
-                </executions>
             </plugin>
         </plugins>
         <pluginManagement>

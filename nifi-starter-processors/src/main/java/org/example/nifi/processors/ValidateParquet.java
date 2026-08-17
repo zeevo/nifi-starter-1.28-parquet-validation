@@ -1,13 +1,34 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.example.nifi.processors;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -16,146 +37,97 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
-import org.apache.nifi.annotation.lifecycle.OnScheduled;
-import org.apache.nifi.components.AllowableValue;
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.components.ValidationResult;
-import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.parquet.ParquetReadOptions;
-import org.apache.parquet.column.page.PageReadStore;
-import org.apache.parquet.example.data.Group;
-import org.apache.parquet.example.data.simple.convert.GroupRecordConverter;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.conf.ParquetConfiguration;
+import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.io.ColumnIOFactory;
-import org.apache.parquet.io.InvalidRecordException;
-import org.apache.parquet.io.MessageColumnIO;
-import org.apache.parquet.io.RecordReader;
+import org.apache.parquet.hadoop.ParquetReader;
+import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
-import org.apache.parquet.schema.MessageTypeParser;
 
-@Tags({"parquet", "validate", "schema", "starter"})
-@CapabilityDescription("Validates FlowFile content against an expected Parquet schema. The content must be a "
-        + "structurally valid Parquet file whose schema matches the configured expectation; optionally every row "
-        + "is decompressed and decoded as well, which detects corruption in the data pages that a schema check "
-        + "alone cannot see. Conforming FlowFiles are routed to 'valid', all others to 'invalid'. Content is "
-        + "never modified.")
+@Tags({"parquet", "validate", "avro", "record"})
+@CapabilityDescription("Validates a Parquet file carried as FlowFile content. The schema must "
+        + "contain the fields id, name and status, and every record must satisfy a fixed set of "
+        + "rules: id present and positive, at least one of name and status present, name not "
+        + "blank when present, and status one of ACTIVE, INACTIVE or PENDING when present. "
+        + "Content is never modified. Note that the whole FlowFile is buffered in memory, because "
+        + "Parquet keeps its footer at the end of the file while NiFi content streams are "
+        + "forward-only.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
 @WritesAttributes({
         @WritesAttribute(attribute = ValidateParquet.RECORD_COUNT_ATTRIBUTE,
-                description = "Number of records in the file, set on FlowFiles routed to 'valid'"),
-        @WritesAttribute(attribute = ValidateParquet.DETAIL_ATTRIBUTE,
-                description = "Reason the file failed validation, set on FlowFiles routed to 'invalid'")
+                description = "Number of records read from the file"),
+        @WritesAttribute(attribute = ValidateParquet.INVALID_COUNT_ATTRIBUTE,
+                description = "Number of records that failed validation"),
+        @WritesAttribute(attribute = ValidateParquet.VIOLATIONS_ATTRIBUTE,
+                description = "Why the file was rejected. Record-level violations are listed as "
+                        + "'row N: reason', capped at the first 10 with a count of the remainder")
 })
 public class ValidateParquet extends AbstractProcessor {
 
-    static final String RECORD_COUNT_ATTRIBUTE = "record.count";
-    static final String DETAIL_ATTRIBUTE = "parquet.validation.detail";
+    static final String RECORD_COUNT_ATTRIBUTE = "parquet.validation.record.count";
+    static final String INVALID_COUNT_ATTRIBUTE = "parquet.validation.invalid.count";
+    static final String VIOLATIONS_ATTRIBUTE = "parquet.validation.violations";
 
-    static final AllowableValue MODE_EXACT = new AllowableValue("exact", "Exact",
-            "The file's schema must match the expected schema exactly: same columns, same order, same types and "
-                    + "repetition (required/optional/repeated). The top-level message name is ignored.");
-    static final AllowableValue MODE_CONTAINS = new AllowableValue("contains", "Contains",
-            "The file's schema must contain every expected column with matching type and repetition; columns not "
-                    + "listed in the expected schema are allowed. Column order is ignored.");
+    private static final String ID_FIELD = "id";
+    private static final String NAME_FIELD = "name";
+    private static final String STATUS_FIELD = "status";
 
-    static final AllowableValue DEPTH_SCHEMA_ONLY = new AllowableValue("schema-only", "Schema Only",
-            "Only the file footer and schema are checked. Fast, but corruption inside data pages is not detected.");
-    static final AllowableValue DEPTH_FULL = new AllowableValue("full", "Schema and Content",
-            "After the schema check, every row is decompressed and decoded, verifying page checksums where "
-                    + "present. Detects corrupt or truncated data pages at the cost of reading the whole file.");
+    private static final List<String> REQUIRED_FIELDS =
+            Collections.unmodifiableList(Arrays.asList(ID_FIELD, NAME_FIELD, STATUS_FIELD));
 
-    private static final Validator PARQUET_SCHEMA_VALIDATOR = (subject, input, context) -> {
-        try {
-            MessageTypeParser.parseMessageType(input);
-            return new ValidationResult.Builder().subject(subject).input(input).valid(true).build();
-        } catch (final RuntimeException e) {
-            return new ValidationResult.Builder().subject(subject).input(input).valid(false)
-                    .explanation("not a valid Parquet message type: " + e.getMessage()).build();
-        }
-    };
+    private static final Set<String> ALLOWED_STATUSES = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList("ACTIVE", "INACTIVE", "PENDING")));
 
-    public static final PropertyDescriptor SCHEMA_ATTRIBUTE = new PropertyDescriptor.Builder()
-            .name("Schema Attribute Name")
-            .displayName("Schema Attribute Name")
-            .description("Optional name of a FlowFile attribute carrying the expected schema, in the same Parquet "
-                    + "message type syntax as the 'Parquet Schema' property. When this is set and the attribute is "
-                    + "present and non-blank, its schema is used for that FlowFile. When the attribute is missing "
-                    + "or blank, the 'Parquet Schema' property is used as the fallback. When the attribute is "
-                    + "present but is not a valid Parquet message type, the FlowFile is routed to 'invalid' rather "
-                    + "than silently falling back, so that a broken schema is not mistaken for an absent one.")
-            .required(false)
-            .addValidator(StandardValidators.ATTRIBUTE_KEY_VALIDATOR)
-            .build();
+    /**
+     * Ceiling on how much content will be buffered. Not configurable by design; raise it here if
+     * larger files are expected. A guard is mandatory rather than merely prudent, since anything
+     * at or above 2 GiB would also overflow the int cast on the array length.
+     */
+    private static final long MAX_IN_MEMORY_BYTES = 256L * 1024 * 1024;
 
-    public static final PropertyDescriptor SCHEMA = new PropertyDescriptor.Builder()
-            .name("Parquet Schema")
-            .displayName("Parquet Schema")
-            .description("The expected schema in Parquet message type syntax, e.g. "
-                    + "'message event { required int64 id; optional binary name (STRING); }'. "
-                    + "Nested group types are supported. This is the fallback schema: it is used whenever a "
-                    + "per-FlowFile schema is not found via 'Schema Attribute Name'.")
-            .required(true)
-            .addValidator(PARQUET_SCHEMA_VALIDATOR)
-            .build();
-
-    public static final PropertyDescriptor MATCH_MODE = new PropertyDescriptor.Builder()
-            .name("Schema Match Mode")
-            .displayName("Schema Match Mode")
-            .description("How the file's schema is compared to the expected schema")
-            .required(true)
-            .allowableValues(MODE_EXACT, MODE_CONTAINS)
-            .defaultValue(MODE_EXACT.getValue())
-            .build();
-
-    public static final PropertyDescriptor VALIDATION_DEPTH = new PropertyDescriptor.Builder()
-            .name("Validation Depth")
-            .displayName("Validation Depth")
-            .description("How much of the file is read during validation")
-            .required(true)
-            .allowableValues(DEPTH_FULL, DEPTH_SCHEMA_ONLY)
-            .defaultValue(DEPTH_FULL.getValue())
-            .build();
+    /** Keeps the violations attribute bounded on a file where every row is bad. */
+    private static final int MAX_REPORTED_VIOLATIONS = 10;
 
     public static final Relationship REL_VALID = new Relationship.Builder()
             .name("valid")
-            .description("FlowFiles that are valid Parquet and conform to the expected schema")
+            .description("Parquet files whose schema and records all passed validation")
             .build();
 
     public static final Relationship REL_INVALID = new Relationship.Builder()
             .name("invalid")
-            .description("FlowFiles that are not valid Parquet or do not conform to the expected schema")
+            .description("FlowFiles that failed validation: a required field is missing, at least "
+                    + "one record broke a rule, or the content is not a readable Parquet file")
             .build();
 
-    private static final List<PropertyDescriptor> PROPERTIES =
-            Collections.unmodifiableList(Arrays.asList(SCHEMA_ATTRIBUTE, SCHEMA, MATCH_MODE, VALIDATION_DEPTH));
+    public static final Relationship REL_FAILURE = new Relationship.Builder()
+            .name("failure")
+            .description("FlowFiles that could not be validated because of an unexpected error, "
+                    + "such as content that could not be read or is too large to buffer")
+            .build();
 
     private static final Set<Relationship> RELATIONSHIPS =
-            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(REL_VALID, REL_INVALID)));
+            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(REL_VALID, REL_INVALID, REL_FAILURE)));
 
-    /** Parsed form of the SCHEMA property, used whenever a per-FlowFile schema is not found. */
-    private volatile MessageType fallbackSchema;
-
-    @Override
-    public List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-        return PROPERTIES;
-    }
+    /**
+     * Reused across invocations. The single-argument parquet builders construct a Hadoop
+     * Configuration instead, which XML-parses core-default.xml on every call.
+     */
+    private final ParquetConfiguration parquetConfiguration = new PlainParquetConfiguration();
 
     @Override
     public Set<Relationship> getRelationships() {
         return RELATIONSHIPS;
-    }
-
-    @OnScheduled
-    public void onScheduled(final ProcessContext context) {
-        fallbackSchema = MessageTypeParser.parseMessageType(context.getProperty(SCHEMA).getValue());
     }
 
     @Override
@@ -165,124 +137,170 @@ public class ValidateParquet extends AbstractProcessor {
             return;
         }
 
-        final boolean exact = MODE_EXACT.getValue().equals(context.getProperty(MATCH_MODE).getValue());
-        final boolean fullRead = DEPTH_FULL.getValue().equals(context.getProperty(VALIDATION_DEPTH).getValue());
-
-        final MessageType expected;
         try {
-            expected = resolveExpectedSchema(context, flowFile);
-        } catch (final RuntimeException e) {
-            getLogger().info("{} has an unusable expected schema: {}", flowFile, e.getMessage());
-            session.transfer(session.putAttribute(flowFile, DETAIL_ATTRIBUTE, e.getMessage()), REL_INVALID);
-            return;
+            final byte[] content = readContent(session, flowFile);
+            final InputFile inputFile =
+                    new ByteArrayInputFile(content, flowFile.getAttribute(CoreAttributes.UUID.key()));
+
+            final ValidationResult result;
+            try {
+                result = validate(inputFile);
+            } catch (final IOException | RuntimeException e) {
+                // parquet-java reports "this is not a Parquet file" with a bare RuntimeException
+                // rather than a typed one, so this catch has to stay broad. Unreadable content is
+                // a data problem, which the user asked to route to invalid rather than failure.
+                getLogger().debug("{} could not be read as Parquet", new Object[] {flowFile}, e);
+                flowFile = session.putAttribute(flowFile, VIOLATIONS_ATTRIBUTE,
+                        "not a readable Parquet file: " + e.getMessage());
+                session.transfer(flowFile, REL_INVALID);
+                return;
+            }
+
+            flowFile = session.putAllAttributes(flowFile, result.attributes);
+            session.transfer(flowFile, result.valid ? REL_VALID : REL_INVALID);
+        } catch (final Exception e) {
+            getLogger().error("Failed to validate {}", new Object[] {flowFile}, e);
+            session.transfer(session.penalize(flowFile), REL_FAILURE);
+        }
+    }
+
+    private byte[] readContent(final ProcessSession session, final FlowFile flowFile) throws IOException {
+        final long size = flowFile.getSize();
+        if (size > MAX_IN_MEMORY_BYTES) {
+            throw new IOException("Content is " + size + " bytes, above the " + MAX_IN_MEMORY_BYTES
+                    + " byte ceiling for in-memory Parquet validation");
         }
 
-        String detail;
-        long recordCount = -1;
+        // getSize is exact, so this is a single right-sized allocation.
+        final byte[] content = new byte[(int) size];
         try (InputStream in = session.read(flowFile)) {
-            final ParquetReadOptions options = ParquetReadOptions.builder()
-                    .usePageChecksumVerification(true)
-                    .build();
-            try (ParquetFileReader reader = ParquetFileReader.open(
-                    new FlowFileInputFile(in, flowFile.getSize()), options)) {
-                final MessageType fileSchema = reader.getFooter().getFileMetaData().getSchema();
-                detail = compareSchema(fileSchema, expected, exact);
-                if (detail == null) {
-                    if (fullRead) {
-                        recordCount = readAllRows(reader, fileSchema);
-                        final long declared = reader.getRecordCount();
-                        if (recordCount != declared) {
-                            detail = "footer declares " + declared + " records but " + recordCount
-                                    + " were read";
-                        }
-                    } else {
-                        recordCount = reader.getRecordCount();
+            StreamUtils.fillBuffer(in, content, true);
+        }
+        return content;
+    }
+
+    private ValidationResult validate(final InputFile inputFile) throws IOException {
+        final MessageType schema = readSchema(inputFile);
+
+        final List<String> missing = new ArrayList<>();
+        for (final String field : REQUIRED_FIELDS) {
+            // containsField is case sensitive and matches top-level fields only, which is what we
+            // want. It also has to come before any getType call, which throws on unknown names.
+            if (!schema.containsField(field)) {
+                missing.add(field);
+            }
+        }
+        if (!missing.isEmpty()) {
+            return ValidationResult.missingFields(missing);
+        }
+
+        long recordCount = 0;
+        long invalidCount = 0;
+        final List<String> violations = new ArrayList<>();
+
+        try (ParquetReader<GenericRecord> reader = AvroParquetReader
+                .<GenericRecord>builder(inputFile, parquetConfiguration)
+                // Short-circuits AvroReadSupport, which would otherwise build another Hadoop
+                // Configuration just to resolve the data model.
+                .withDataModel(GenericData.get())
+                .build()) {
+
+            GenericRecord record;
+            while ((record = reader.read()) != null) {
+                recordCount++;
+                final String violation = validateRecord(record);
+                if (violation != null) {
+                    invalidCount++;
+                    // Keep counting past the cap so invalid.count stays accurate.
+                    if (violations.size() < MAX_REPORTED_VIOLATIONS) {
+                        violations.add("row " + recordCount + ": " + violation);
                     }
                 }
-            } catch (final IOException | RuntimeException e) {
-                detail = "not a valid Parquet file: " + e.getMessage();
             }
-        } catch (final IOException e) {
-            detail = "not a valid Parquet file: " + e.getMessage();
         }
 
-        if (detail == null) {
-            flowFile = session.putAttribute(flowFile, RECORD_COUNT_ATTRIBUTE, String.valueOf(recordCount));
-            session.transfer(flowFile, REL_VALID);
-        } else {
-            getLogger().info("{} failed Parquet validation: {}", flowFile, detail);
-            flowFile = session.putAttribute(flowFile, DETAIL_ATTRIBUTE, detail);
-            session.transfer(flowFile, REL_INVALID);
+        return ValidationResult.of(recordCount, invalidCount, violations);
+    }
+
+    /** Reads the footer only. No column data is decompressed. */
+    private MessageType readSchema(final InputFile inputFile) throws IOException {
+        final ParquetReadOptions options = ParquetReadOptions.builder(parquetConfiguration).build();
+        try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
+            return reader.getFileMetaData().getSchema();
         }
     }
 
-    /**
-     * Resolves the schema to validate against. A FlowFile carrying its own schema in the
-     * configured attribute wins; otherwise the SCHEMA property is the fallback. An
-     * attribute that is present but unparseable is an error rather than a reason to fall
-     * back, so that a malformed schema is not mistaken for an absent one.
-     */
-    private MessageType resolveExpectedSchema(final ProcessContext context, final FlowFile flowFile) {
-        final String attributeName = context.getProperty(SCHEMA_ATTRIBUTE).getValue();
-        if (attributeName == null) {
-            return fallbackSchema;
-        }
+    /** @return the first rule the record breaks, or null if it passes */
+    private static String validateRecord(final GenericRecord record) {
+        final Object rawId = record.get(ID_FIELD);
+        final String name = text(record, NAME_FIELD);
+        final String status = text(record, STATUS_FIELD);
 
-        final String schemaText = flowFile.getAttribute(attributeName);
-        if (schemaText == null || schemaText.trim().isEmpty()) {
-            getLogger().debug("{} has no schema in attribute '{}', using the fallback schema",
-                    flowFile, attributeName);
-            return fallbackSchema;
+        if (rawId == null) {
+            return "id is null";
         }
-
-        try {
-            return MessageTypeParser.parseMessageType(schemaText);
-        } catch (final RuntimeException e) {
-            throw new IllegalArgumentException("attribute '" + attributeName
-                    + "' is not a valid Parquet message type: " + e.getMessage(), e);
+        if (!(rawId instanceof Number)) {
+            return "id is not numeric";
         }
+        if (((Number) rawId).longValue() <= 0) {
+            return "id must be positive";
+        }
+        if (name == null && status == null) {
+            return "name and status are both null";
+        }
+        if (name != null && name.trim().isEmpty()) {
+            return "name is blank";
+        }
+        if (status != null && !ALLOWED_STATUSES.contains(status)) {
+            return "status '" + status + "' is not an allowed value";
+        }
+        return null;
     }
 
     /**
-     * Returns null when the file schema conforms, otherwise a human-readable reason.
-     * The top-level message name is ignored in both modes: producers name it
-     * inconsistently (e.g. Avro record name, "spark_schema", "root").
+     * Avro hands back Utf8 rather than String unless the writer set avro.java.string, which files
+     * from Spark, pyarrow and DuckDB do not, so casting to String would fail on most real files.
      */
-    private String compareSchema(final MessageType fileSchema, final MessageType expectedSchema,
-            final boolean exact) {
-        final MessageType expected = new MessageType(fileSchema.getName(), expectedSchema.getFields());
-        if (exact) {
-            if (expected.equals(fileSchema)) {
-                return null;
-            }
-            return "schema does not exactly match the expected schema. Expected: " + expected
-                    + " Actual: " + fileSchema;
-        }
-        try {
-            fileSchema.checkContains(expected);
-            return null;
-        } catch (final InvalidRecordException e) {
-            return "schema does not contain the expected columns: " + e.getMessage();
-        }
+    private static String text(final GenericRecord record, final String field) {
+        final Object value = record.get(field);
+        return value == null ? null : value.toString();
     }
 
-    /**
-     * Decodes every row of every row group, forcing all pages to be decompressed and
-     * read. Throws if any page is corrupt, undecodable, or fails its checksum.
-     */
-    private long readAllRows(final ParquetFileReader reader, final MessageType fileSchema) throws IOException {
-        final MessageColumnIO columnIO = new ColumnIOFactory().getColumnIO(fileSchema);
-        long count = 0;
-        PageReadStore rowGroup;
-        while ((rowGroup = reader.readNextRowGroup()) != null) {
-            final RecordReader<Group> recordReader =
-                    columnIO.getRecordReader(rowGroup, new GroupRecordConverter(fileSchema));
-            for (long i = 0, rows = rowGroup.getRowCount(); i < rows; i++) {
-                recordReader.read();
-                count++;
-            }
+    private static final class ValidationResult {
+
+        private final boolean valid;
+        private final Map<String, String> attributes;
+
+        private ValidationResult(final boolean valid, final Map<String, String> attributes) {
+            this.valid = valid;
+            this.attributes = attributes;
         }
-        return count;
+
+        /** No records are read in this case, so no counts are reported. */
+        static ValidationResult missingFields(final List<String> missing) {
+            final Map<String, String> attributes = new HashMap<>();
+            attributes.put(VIOLATIONS_ATTRIBUTE,
+                    "schema is missing required field(s): " + String.join(", ", missing));
+            return new ValidationResult(false, attributes);
+        }
+
+        static ValidationResult of(final long recordCount, final long invalidCount,
+                final List<String> violations) {
+            final Map<String, String> attributes = new HashMap<>();
+            attributes.put(RECORD_COUNT_ATTRIBUTE, Long.toString(recordCount));
+            attributes.put(INVALID_COUNT_ATTRIBUTE, Long.toString(invalidCount));
+
+            if (invalidCount > 0) {
+                final StringBuilder message = new StringBuilder(String.join("; ", violations));
+                final long unreported = invalidCount - violations.size();
+                if (unreported > 0) {
+                    message.append("; ... and ").append(unreported).append(" more");
+                }
+                attributes.put(VIOLATIONS_ATTRIBUTE, message.toString());
+            }
+
+            return new ValidationResult(invalidCount == 0, attributes);
+        }
     }
 
 }

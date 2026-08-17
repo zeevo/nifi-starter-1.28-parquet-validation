@@ -5,7 +5,7 @@
 # without restarting the container.
 #
 #   mvn clean install
-#   cp nifi-starter-nar/target/*.nar nars/
+#   cp nifi-starter-api-nar/target/*.nar nifi-starter-nar/target/*.nar nars/
 #   docker compose up -d
 #
 # Then open https://localhost:8443/nifi and accept the self-signed certificate.

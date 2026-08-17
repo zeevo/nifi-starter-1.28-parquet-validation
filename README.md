@@ -1,8 +1,7 @@
 # nifi-starter
 
 A Maven monorepo for building Apache **NiFi 1.28.1** extensions: a controller service API,
-its implementation, custom processors, and the NAR that packages them. Every example exists
-in both **Java and Kotlin**.
+its implementation, custom processors, and the NAR that packages them.
 
 Scaffolded with the official NiFi archetypes (`nifi-processor-bundle-archetype` and
 `nifi-service-bundle-archetype`, both `1.28.1`), then merged into a single reactor.
@@ -14,8 +13,8 @@ nifi-starter/
 ├── mise.toml                  JDK 11 + Maven pinned for this repo
 ├── pom.xml                    standalone parent: versions, dependencyManagement, nar plugin
 ├── nifi-starter-api/          jar  — StarterService (ControllerService interface)
-├── nifi-starter-services/     jar  — StandardStarterService + KotlinStarterService
-├── nifi-starter-processors/   jar  — TransformContentProcessor, KotlinTransformProcessor, ValidateParquet
+├── nifi-starter-services/     jar  — StandardStarterService (implementation)
+├── nifi-starter-processors/   jar  — TransformContentProcessor
 ├── nifi-starter-nar/          nar  — bundles all three for deployment
 ├── docker-compose.yml         single-node NiFi 1.28.1 for local testing
 └── nars/                      staging dir mounted as NiFi's autoload directory
@@ -27,18 +26,14 @@ layering. The jar/NAR distinction is orthogonal: modules are *compile* units, a 
 
 ```
 nifi-starter-nar  (api + services + processors)
-      └── parent: nifi-hadoop-libraries-nar  (Hadoop client libraries)
-            └── parent: nifi-standard-shared-nar
-                  └── parent: nifi-standard-services-api-nar  (NiFi's standard service APIs)
+      └── parent: nifi-standard-services-api-nar  (NiFi's standard service APIs)
 ```
 
 The parent link is a single `<type>nar</type>` dependency, written to the manifest as
-`Nar-Dependency-Id`. A NAR may declare **at most one** NAR dependency, but parent NARs
-chain: `nifi-hadoop-libraries-nar` supplies the Hadoop client jars that `ValidateParquet`'s
-`parquet-hadoop` dependency needs at runtime (declared `provided` here, so never bundled),
-and its own ancestry keeps `SSLContextService`, `DBCPService`, `RecordReaderFactory` and
-friends on the classloader chain too. This mirrors how NiFi's own `nifi-parquet-nar` is
-wired.
+`Nar-Dependency-Id`. A NAR may declare **at most one** NAR dependency. This project doesn't
+currently use NiFi's standard services, but naming that NAR as the parent means a processor
+here can reference `SSLContextService`, `DBCPService`, `RecordReaderFactory` and friends
+without restructuring.
 
 ### When you'd need a separate API NAR
 
@@ -71,10 +66,8 @@ brew install mise
 mise install          # reads mise.toml -> Temurin 11.0.31, Maven 3.9.16
 ```
 
-NiFi 1.28.1's own poms default to Java 8 bytecode (its released `nifi-api` jar is class file
-major version 52) and bump to 11 under a JDK 11+ profile. This project pins
-`maven.compiler.release` to 11 explicitly rather than depending on profile activation.
-Without mise, any JDK 11–21 and Maven 3.9+ work.
+Java 11 matches what NiFi 1.28.1 is built against (`maven.compiler.release` is 11). Without
+mise, any JDK 11–21 and Maven 3.9+ work.
 
 ## Build
 
@@ -105,80 +98,23 @@ container restart.
 
 ## What the example code does
 
-| Class | Lang | Module | Role |
-|---|---|---|---|
-| `StarterService` | Java | api | `String transform(String)` — the service contract |
-| `StandardStarterService` | Java | services | Prefixes values, optionally upper-cases them |
-| `KotlinStarterService` | Kotlin | services | Same behaviour, default prefix `kotlin-` |
-| `TransformContentProcessor` | Java | processors | Transforms content via the service |
-| `KotlinTransformProcessor` | Kotlin | processors | Same, writes `starter.kotlin.service.id` |
-| `ValidateParquet` | Java | processors | Routes FlowFiles by conformance to an expected Parquet schema |
-
-### ValidateParquet
-
-Validates FlowFile content against a known Parquet schema, given in Parquet message type
-syntax (e.g. `message event { required int64 id; optional binary name (STRING); }`).
-Conforming files route to `valid` (with a `record.count` attribute), everything else to
-`invalid` (with the reason in `parquet.validation.detail`). Content is never modified.
-
-- **Schema Attribute Name** (optional): a FlowFile attribute carrying its own expected
-  schema, in the same syntax. When set and the attribute is present, that schema is used
-  for that FlowFile; when the attribute is missing or blank, `Parquet Schema` is the
-  fallback. An attribute that is present but malformed routes to `invalid` rather than
-  falling back, so a broken schema is never mistaken for an absent one.
-- **Schema Match Mode**: `Exact` (same columns, order, types, repetition) or `Contains`
-  (file must contain every expected column; extras allowed). The top-level message name is
-  ignored in both modes, since producers name it inconsistently (`spark_schema`, `root`,
-  the Avro record name, ...).
-- **Validation Depth**: `Schema and Content` (default) additionally decompresses and
-  decodes every row, verifying page checksums, which catches data-page corruption that a
-  footer check cannot see. `Schema Only` reads just the footer, which is orders of
-  magnitude faster on large files.
-
-Parquet reads a row group at a time, so memory for deep validation tracks row-group size
-(commonly up to 128 MB), not file size. All parsing and decoding is upstream
-`parquet-hadoop` (the same parquet-mr library NiFi's own parquet bundle uses); the only
-custom I/O is a small `InputFile` adapter over the FlowFile stream, modeled on NiFi's
-`NifiParquetInputFile`.
+| Class | Module | Role |
+|---|---|---|
+| `StarterService` | api | `String transform(String)` — the service contract |
+| `StandardStarterService` | services | Prefixes values, optionally upper-cases them |
+| `TransformContentProcessor` | processors | Reads content as text, transforms it via the service, writes it back |
 
 Extensions are discovered through `META-INF/services/` files — `org.apache.nifi.processor.Processor`
 and `org.apache.nifi.controller.ControllerService`. **A new processor or service that isn't
-listed there will not appear in NiFi**, regardless of which language it's written in.
+listed there will not appear in NiFi.**
 
 Tests use `nifi-mock`'s `TestRunner`. Note that `nifi-starter-processors` tests against a
 stub service (`StubStarterService`) rather than depending on the implementation module, so
 the two stay decoupled.
 
-## Kotlin
-
-Kotlin is wired up in every module; a module simply needs a `src/main/kotlin` (or
-`src/test/kotlin`) directory. Mixed sources compile in one pass — `kotlin-maven-plugin` runs
-first and reads the Java sources for cross-references, then javac compiles the Java against
-the resulting class files. That ordering is why the root pom disables maven-compiler-plugin's
-`default-compile`/`default-testCompile` executions and re-adds them after the Kotlin plugin;
-within a phase, Maven runs plugins in declaration order.
-
-The two languages interoperate freely, and the examples deliberately demonstrate it:
-
-- `KotlinStarterService` implements the **Java** `StarterService` interface.
-- `KotlinTransformProcessor` accepts any `StarterService`, Java or Kotlin.
-- `KotlinTransformProcessorTest` (Kotlin) drives `StubStarterService` (Java).
-- `KotlinStarterServiceTest` (Kotlin) drives `ServiceTestProcessor` (Java).
-
-Two Kotlin specifics worth copying:
-
-- Property descriptors and relationships go in a `companion object` and are annotated
-  `@JvmField`, so they are real static fields — what NiFi's reflection and Java callers
-  expect. Without `@JvmField` they become getters on a `Companion` object.
-- `kotlin-stdlib` is a normal compile dependency and is bundled into the NAR
-  (`kotlin-stdlib-2.4.10.jar`), because NiFi ships no Kotlin runtime of its own.
-
-`jvmTarget` follows `maven.compiler.release`, so Kotlin and Java both emit Java 11 bytecode.
-
 ## Adding a processor
 
-1. Create the class in `nifi-starter-processors/src/main/{java,kotlin}`, extending
-   `AbstractProcessor`.
+1. Create the class in `nifi-starter-processors`, extending `AbstractProcessor`.
 2. Add its fully-qualified name to
    `nifi-starter-processors/src/main/resources/META-INF/services/org.apache.nifi.processor.Processor`.
 3. Add a `TestRunner` test.
@@ -187,8 +123,7 @@ Two Kotlin specifics worth copying:
 ## Adding a controller service
 
 1. Put the interface in `nifi-starter-api`, extending `ControllerService`.
-2. Implement it in `nifi-starter-services/src/main/{java,kotlin}`, extending
-   `AbstractControllerService`.
+2. Implement it in `nifi-starter-services`, extending `AbstractControllerService`.
 3. Add the implementation's FQN to
    `nifi-starter-services/src/main/resources/META-INF/services/org.apache.nifi.controller.ControllerService`.
 4. `mvn clean install`.

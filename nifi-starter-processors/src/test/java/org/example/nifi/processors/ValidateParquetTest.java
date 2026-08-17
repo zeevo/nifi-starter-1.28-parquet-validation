@@ -1,321 +1,195 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.example.nifi.processors;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collections;
+import java.io.InputStream;
 
-import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
-import org.apache.hadoop.conf.Configuration;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
-import org.apache.parquet.avro.AvroParquetWriter;
-import org.apache.parquet.hadoop.ParquetWriter;
-import org.apache.parquet.hadoop.metadata.CompressionCodecName;
-import org.apache.parquet.io.OutputFile;
-import org.apache.parquet.io.PositionOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Fixtures live in src/test/resources/parquet. All of them use the Avro schema
+ * {@code {id: ["null","long"], name: ["null","string"], status: ["null","string"]}} except
+ * missing-status-column.parquet, which omits the status field entirely. None of them set
+ * avro.java.string, so string values come back as Utf8 and the processor's Utf8 handling is
+ * exercised for real.
+ *
+ * <pre>
+ * valid.parquet                  (1,"bob","ACTIVE"), (2,"carol","PENDING")
+ * valid-null-name.parquet        (1,null,"ACTIVE")
+ * valid-null-status.parquet      (1,"bob",null)
+ * empty.parquet                  no rows, full schema
+ * invalid-null-id.parquet        (null,"bob","ACTIVE")
+ * invalid-zero-id.parquet        (0,"bob","ACTIVE")
+ * invalid-both-null.parquet      (1,null,null)
+ * invalid-blank-name.parquet     (1,"   ","ACTIVE")
+ * invalid-bad-status.parquet     (1,"bob","BOGUS")
+ * invalid-many.parquet           rows 1-5 valid, rows 6-20 have id 0
+ * missing-status-column.parquet  (1,"bob"), no status field
+ * </pre>
+ */
 public class ValidateParquetTest {
-
-    private static final String AVRO_SCHEMA = "{\"type\":\"record\",\"name\":\"Event\",\"fields\":["
-            + "{\"name\":\"id\",\"type\":\"long\"},"
-            + "{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null}]}";
-
-    private static final String AVRO_SCHEMA_EXTRA_COLUMN = "{\"type\":\"record\",\"name\":\"Event\",\"fields\":["
-            + "{\"name\":\"id\",\"type\":\"long\"},"
-            + "{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null},"
-            + "{\"name\":\"extra\",\"type\":\"int\"}]}";
-
-    private static final String EXPECTED_SCHEMA =
-            "message event { required int64 id; optional binary name (STRING); }";
 
     private TestRunner runner;
 
     @BeforeEach
     public void init() {
         runner = TestRunners.newTestRunner(ValidateParquet.class);
-        runner.setProperty(ValidateParquet.SCHEMA, EXPECTED_SCHEMA);
     }
 
     @Test
-    public void testInvalidSchemaPropertyFailsValidation() {
-        runner.setProperty(ValidateParquet.SCHEMA, "message broken { not a schema }");
-        runner.assertNotValid();
+    public void testValidFile() throws IOException {
+        final MockFlowFile out = runFixture("valid.parquet", ValidateParquet.REL_VALID);
+
+        assertEquals("2", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("0", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+        assertNull(out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
     }
 
     @Test
-    public void testConformingFileIsValid() throws IOException {
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 100));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
-        final MockFlowFile out = runner.getFlowFilesForRelationship(ValidateParquet.REL_VALID).get(0);
-        out.assertAttributeEquals(ValidateParquet.RECORD_COUNT_ATTRIBUTE, "100");
+    public void testNullNameWithStatusIsValid() throws IOException {
+        runFixture("valid-null-name.parquet", ValidateParquet.REL_VALID);
     }
 
     @Test
-    public void testMessageNameIsIgnored() throws IOException {
-        // file's message name is "Event" (the Avro record name); expected says "event"
-        runner.setProperty(ValidateParquet.SCHEMA,
-                "message somethingelse { required int64 id; optional binary name (STRING); }");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+    public void testNullStatusWithNameIsValid() throws IOException {
+        runFixture("valid-null-status.parquet", ValidateParquet.REL_VALID);
     }
 
     @Test
-    public void testWrongColumnTypeIsInvalid() throws IOException {
-        runner.setProperty(ValidateParquet.SCHEMA,
-                "message event { required int32 id; optional binary name (STRING); }");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
+    public void testFileWithNoRecordsIsValid() throws IOException {
+        final MockFlowFile out = runFixture("empty.parquet", ValidateParquet.REL_VALID);
 
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-        assertDetailContains("int32");
+        assertEquals("0", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("0", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
     }
 
     @Test
-    public void testMissingColumnIsInvalid() throws IOException {
-        runner.setProperty(ValidateParquet.SCHEMA,
-                "message event { required int64 id; required binary missing_col (STRING); }");
-        runner.setProperty(ValidateParquet.MATCH_MODE, ValidateParquet.MODE_CONTAINS.getValue());
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-        assertDetailContains("missing_col");
+    public void testNullIdIsInvalid() throws IOException {
+        assertViolation("invalid-null-id.parquet", "row 1: id is null");
     }
 
     @Test
-    public void testRequiredVsOptionalIsInvalid() throws IOException {
-        // file has optional name; expecting required must fail even in contains mode
-        runner.setProperty(ValidateParquet.SCHEMA,
-                "message event { required int64 id; required binary name (STRING); }");
-        runner.setProperty(ValidateParquet.MATCH_MODE, ValidateParquet.MODE_CONTAINS.getValue());
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
+    public void testNonPositiveIdIsInvalid() throws IOException {
+        assertViolation("invalid-zero-id.parquet", "row 1: id must be positive");
     }
 
     @Test
-    public void testExtraColumnIsInvalidInExactMode() throws IOException {
-        runner.enqueue(writeParquet(AVRO_SCHEMA_EXTRA_COLUMN, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
+    public void testNullNameAndNullStatusIsInvalid() throws IOException {
+        assertViolation("invalid-both-null.parquet", "row 1: name and status are both null");
     }
 
     @Test
-    public void testExtraColumnIsValidInContainsMode() throws IOException {
-        runner.setProperty(ValidateParquet.MATCH_MODE, ValidateParquet.MODE_CONTAINS.getValue());
-        runner.enqueue(writeParquet(AVRO_SCHEMA_EXTRA_COLUMN, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+    public void testBlankNameIsInvalid() throws IOException {
+        assertViolation("invalid-blank-name.parquet", "row 1: name is blank");
     }
 
     @Test
-    public void testAttributeSchemaIsUsedWhenPresent() throws IOException {
-        // property would reject this file; the attribute's schema accepts it
-        runner.setProperty(ValidateParquet.SCHEMA, "message event { required int64 totally_different; }");
-        runner.setProperty(ValidateParquet.SCHEMA_ATTRIBUTE, "parquet.schema");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5),
-                Collections.singletonMap("parquet.schema", EXPECTED_SCHEMA));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+    public void testDisallowedStatusIsInvalid() throws IOException {
+        assertViolation("invalid-bad-status.parquet", "row 1: status 'BOGUS' is not an allowed value");
     }
 
     @Test
-    public void testFallsBackToPropertyWhenAttributeMissing() throws IOException {
-        runner.setProperty(ValidateParquet.SCHEMA_ATTRIBUTE, "parquet.schema");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
+    public void testViolationsAreCappedButStillCounted() throws IOException {
+        final MockFlowFile out = runFixture("invalid-many.parquet", ValidateParquet.REL_INVALID);
 
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+        assertEquals("20", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("15", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+
+        final String violations = out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE);
+        assertTrue(violations.startsWith("row 6: id must be positive"), violations);
+        assertTrue(violations.contains("row 15: id must be positive"), violations);
+        assertTrue(violations.endsWith("; ... and 5 more"), violations);
+        // The cap is 10 messages, so row 16 onwards is only reflected in the count.
+        assertTrue(!violations.contains("row 16:"), violations);
     }
 
     @Test
-    public void testFallsBackToPropertyWhenAttributeIsBlank() throws IOException {
-        runner.setProperty(ValidateParquet.SCHEMA_ATTRIBUTE, "parquet.schema");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5),
-                Collections.singletonMap("parquet.schema", "   "));
-        runner.run();
+    public void testMissingRequiredColumnIsInvalid() throws IOException {
+        final MockFlowFile out = runFixture("missing-status-column.parquet", ValidateParquet.REL_INVALID);
 
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
-    }
-
-    @Test
-    public void testFallbackStillRejectsNonConformingFile() throws IOException {
-        // the fallback must actually be applied, not just accepted blindly
-        runner.setProperty(ValidateParquet.SCHEMA, "message event { required int64 totally_different; }");
-        runner.setProperty(ValidateParquet.SCHEMA_ATTRIBUTE, "parquet.schema");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-        assertDetailContains("totally_different");
-    }
-
-    @Test
-    public void testMalformedAttributeSchemaIsInvalidRatherThanFallingBack() throws IOException {
-        runner.setProperty(ValidateParquet.SCHEMA_ATTRIBUTE, "parquet.schema");
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5),
-                Collections.singletonMap("parquet.schema", "message broken { not a schema }"));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-        assertDetailContains("not a valid Parquet message type");
-    }
-
-    @Test
-    public void testAttributeIgnoredWhenAttributeNameNotConfigured() throws IOException {
-        // no Schema Attribute Name set, so a stray attribute must not be picked up
-        runner.enqueue(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 5),
-                Collections.singletonMap("parquet.schema", "message event { required int64 nope; }"));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+        assertEquals("schema is missing required field(s): status",
+                out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+        // No rows are read once the schema check fails, so no counts are reported.
+        assertNull(out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
     }
 
     @Test
     public void testNonParquetContentIsInvalid() {
-        runner.enqueue("this is definitely not a parquet file");
+        runner.enqueue("hello");
         runner.run();
 
         runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-        assertDetailContains("not a valid Parquet file");
+        final String violations = runner.getFlowFilesForRelationship(ValidateParquet.REL_INVALID)
+                .get(0).getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE);
+        assertTrue(violations.startsWith("not a readable Parquet file: "), violations);
     }
 
     @Test
-    public void testTruncatedFileIsInvalid() throws IOException {
-        final byte[] good = writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 100);
-        runner.enqueue(Arrays.copyOf(good, good.length - 40));
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
-    }
-
-    @Test
-    public void testCorruptDataPageIsInvalidWithFullDepth() throws IOException {
-        runner.enqueue(corruptDataPage(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 100)));
+    public void testEmptyContentIsInvalid() {
+        runner.enqueue(new byte[0]);
         runner.run();
 
         runner.assertAllFlowFilesTransferred(ValidateParquet.REL_INVALID, 1);
     }
 
     @Test
-    public void testCorruptDataPagePassesSchemaOnlyDepth() throws IOException {
-        // documents the trade-off: schema-only cannot see data page corruption
-        runner.setProperty(ValidateParquet.VALIDATION_DEPTH, ValidateParquet.DEPTH_SCHEMA_ONLY.getValue());
-        runner.enqueue(corruptDataPage(writeParquet(AVRO_SCHEMA, CompressionCodecName.SNAPPY, 100)));
+    public void testContentIsNotModified() throws IOException {
+        final byte[] original = fixtureBytes("valid.parquet");
+
+        runner.enqueue(original);
         runner.run();
 
-        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+        runner.getFlowFilesForRelationship(ValidateParquet.REL_VALID).get(0).assertContentEquals(original);
     }
 
-    @Test
-    public void testAllCodecs() throws IOException {
-        for (final CompressionCodecName codec : new CompressionCodecName[] {
-                CompressionCodecName.UNCOMPRESSED, CompressionCodecName.SNAPPY,
-                CompressionCodecName.GZIP, CompressionCodecName.ZSTD}) {
-            runner.clearTransferState();
-            runner.enqueue(writeParquet(AVRO_SCHEMA, codec, 50));
-            runner.run();
-            runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
-        }
+    private void assertViolation(final String fixture, final String expected) throws IOException {
+        final MockFlowFile out = runFixture(fixture, ValidateParquet.REL_INVALID);
+
+        assertEquals("1", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+        assertEquals(expected, out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
     }
 
-    private void assertDetailContains(final String fragment) {
-        final MockFlowFile out = runner.getFlowFilesForRelationship(ValidateParquet.REL_INVALID).get(0);
-        final String detail = out.getAttribute(ValidateParquet.DETAIL_ATTRIBUTE);
-        assertTrue(detail != null && detail.contains(fragment),
-                "expected detail containing '" + fragment + "' but was: " + detail);
+    private MockFlowFile runFixture(final String fixture, final Relationship expected) throws IOException {
+        runner.enqueue(fixtureBytes(fixture));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(expected, 1);
+        return runner.getFlowFilesForRelationship(expected).get(0);
     }
 
-    private static byte[] writeParquet(final String avroSchemaJson, final CompressionCodecName codec,
-            final int rows) throws IOException {
-        final Schema schema = new Schema.Parser().parse(avroSchemaJson);
-        final InMemoryOutputFile out = new InMemoryOutputFile();
-        try (ParquetWriter<GenericRecord> writer = AvroParquetWriter.<GenericRecord>builder(out)
-                .withSchema(schema)
-                .withConf(new Configuration())
-                .withCompressionCodec(codec)
-                .build()) {
-            for (int i = 0; i < rows; i++) {
-                final GenericRecord record = new GenericData.Record(schema);
-                record.put("id", (long) i);
-                record.put("name", "row number " + i);
-                if (schema.getField("extra") != null) {
-                    record.put("extra", i);
-                }
-                writer.write(record);
-            }
-        }
-        return out.toByteArray();
-    }
-
-    /** Flips a byte in the data page region (after the 4-byte magic, well before the footer). */
-    private static byte[] corruptDataPage(final byte[] file) {
-        final byte[] corrupted = file.clone();
-        corrupted[100] ^= (byte) 0xFF;
-        return corrupted;
-    }
-
-    private static class InMemoryOutputFile implements OutputFile {
-        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-
-        byte[] toByteArray() {
+    private byte[] fixtureBytes(final String fixture) throws IOException {
+        try (InputStream in = getClass().getResourceAsStream("/parquet/" + fixture)) {
+            assertNotNull(in, "missing fixture " + fixture);
+            final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            StreamUtils.copy(in, buffer);
             return buffer.toByteArray();
-        }
-
-        @Override
-        public PositionOutputStream create(final long blockSizeHint) {
-            return createOrOverwrite(blockSizeHint);
-        }
-
-        @Override
-        public PositionOutputStream createOrOverwrite(final long blockSizeHint) {
-            buffer.reset();
-            return new PositionOutputStream() {
-                private long pos = 0;
-
-                @Override
-                public long getPos() {
-                    return pos;
-                }
-
-                @Override
-                public void write(final int b) {
-                    buffer.write(b);
-                    pos++;
-                }
-
-                @Override
-                public void write(final byte[] b, final int off, final int len) {
-                    buffer.write(b, off, len);
-                    pos += len;
-                }
-            };
-        }
-
-        @Override
-        public boolean supportsBlockSize() {
-            return false;
-        }
-
-        @Override
-        public long defaultBlockSize() {
-            return 0;
         }
     }
 
