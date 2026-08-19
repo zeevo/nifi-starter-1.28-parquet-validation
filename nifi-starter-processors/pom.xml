@@ -47,112 +47,18 @@
             <scope>provided</scope>
         </dependency>
 
-        <!--
-          Parquet. parquet-avro brings parquet-hadoop, parquet-column and parquet-common with it,
-          plus avro. Its own Hadoop dependencies are declared 'provided' upstream, so Maven hands
-          us nothing transitively and we have to supply them ourselves below.
-        -->
+        <!-- Parquet, and the Hadoop it needs at runtime. See the root pom for why. -->
         <dependency>
             <groupId>org.apache.parquet</groupId>
             <artifactId>parquet-avro</artifactId>
         </dependency>
-
-        <!--
-          hadoop-common and hadoop-mapreduce-client-core are both required at runtime even though
-          this bundle never touches a filesystem (see the root pom for why). They are pulled with
-          wildcard exclusions because hadoop-common declares compile-scope dependencies on jetty,
-          jersey, zookeeper, curator, netty, kerby, protobuf, reload4j, slf4j-reload4j and its own
-          copy of avro. Several of those are on NiFi's banned-dependency list, and the avro one
-          would fight our pinned version. Enumerating a denylist is unmaintainable; the leaves the
-          import graph actually touches are re-added individually below.
-        -->
         <dependency>
             <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-common</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
+            <artifactId>hadoop-client-api</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-mapreduce-client-core</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <!-- Hadoop leaves, re-added one at a time. Comment records what needs each. -->
-        <!-- org.apache.hadoop.classification.{InterfaceAudience,InterfaceStability} -->
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-annotations</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <!-- Configuration, CodecPool and StringUtils import ...thirdparty.com.google.common.* -->
-        <dependency>
-            <groupId>org.apache.hadoop.thirdparty</groupId>
-            <artifactId>hadoop-shaded-guava</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <!-- Configuration imports com.ctc.wstx.* for its XML parsing -->
-        <dependency>
-            <groupId>com.fasterxml.woodstox</groupId>
-            <artifactId>woodstox-core</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <!-- Configuration imports org.codehaus.stax2.XMLStreamReader2 -->
-        <dependency>
-            <groupId>org.codehaus.woodstox</groupId>
-            <artifactId>stax2-api</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <!-- Configuration imports org.apache.commons.collections.map.UnmodifiableMap -->
-        <dependency>
-            <groupId>commons-collections</groupId>
-            <artifactId>commons-collections</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <!-- org.apache.hadoop.util.StringUtils imports commons-lang3 SystemUtils and FastDateFormat -->
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-lang3</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
+            <artifactId>hadoop-client-runtime</artifactId>
         </dependency>
 
         <dependency>

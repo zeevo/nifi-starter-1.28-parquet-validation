@@ -46,13 +46,7 @@
           arbitrary classes). 1.17.1 also targets Java 11, matching this build.
         -->
         <parquet.version>1.17.1</parquet.version>
-        <avro.version>1.11.5</avro.version>
         <hadoop.version>3.4.1</hadoop.version>
-        <hadoop.thirdparty.version>1.3.0</hadoop.thirdparty.version>
-        <woodstox.version>5.4.0</woodstox.version>
-        <stax2.version>4.2.1</stax2.version>
-        <commons.collections.version>3.2.2</commons.collections.version>
-        <commons.lang3.version>3.17.0</commons.lang3.version>
 
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
@@ -140,83 +134,33 @@
                 <scope>provided</scope>
             </dependency>
 
-            <!-- Parquet -->
+            <!--
+              Parquet, plus the Hadoop it needs at runtime.
+
+              parquet-hadoop reaches org.apache.hadoop.conf.Configuration and
+              ParquetInputFormat's FileInputFormat superclass even on the InputFile read path,
+              and parquet declares Hadoop as provided, so we have to supply it ourselves.
+
+              hadoop-client-api and hadoop-client-runtime are the pair Hadoop publishes for
+              exactly this: the API jar carries the org.apache.hadoop classes, the runtime jar
+              carries their third-party dependencies with the packages relocated. Because those
+              are relocated they cannot collide with parquet's or NiFi's copies, so no exclusions
+              are needed anywhere in this build.
+            -->
             <dependency>
                 <groupId>org.apache.parquet</groupId>
                 <artifactId>parquet-avro</artifactId>
                 <version>${parquet.version}</version>
             </dependency>
             <dependency>
-                <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-hadoop</artifactId>
-                <version>${parquet.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-column</artifactId>
-                <version>${parquet.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-common</artifactId>
-                <version>${parquet.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.avro</groupId>
-                <artifactId>avro</artifactId>
-                <version>${avro.version}</version>
-            </dependency>
-
-            <!--
-              Hadoop is not optional even though we never touch a filesystem. parquet-hadoop's
-              ParquetReadOptions.Builder calls HadoopCodecs.newFactory (needs
-              org.apache.hadoop.conf.Configuration and the io.compress codecs) and a static method
-              on ParquetInputFormat, which extends org.apache.hadoop.mapreduce.lib.input
-              .FileInputFormat, so loading it forces superclass resolution. That is why
-              hadoop-mapreduce-client-core is here alongside hadoop-common.
-
-              Both are pulled with wildcard exclusions in nifi-starter-processors and the handful
-              of leaves the import graph actually touches are re-added individually.
-            -->
-            <dependency>
                 <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-common</artifactId>
+                <artifactId>hadoop-client-api</artifactId>
                 <version>${hadoop.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-mapreduce-client-core</artifactId>
+                <artifactId>hadoop-client-runtime</artifactId>
                 <version>${hadoop.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-annotations</artifactId>
-                <version>${hadoop.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.hadoop.thirdparty</groupId>
-                <artifactId>hadoop-shaded-guava</artifactId>
-                <version>${hadoop.thirdparty.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.woodstox</groupId>
-                <artifactId>woodstox-core</artifactId>
-                <version>${woodstox.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.codehaus.woodstox</groupId>
-                <artifactId>stax2-api</artifactId>
-                <version>${stax2.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>commons-collections</groupId>
-                <artifactId>commons-collections</artifactId>
-                <version>${commons.collections.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-lang3</artifactId>
-                <version>${commons.lang3.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
