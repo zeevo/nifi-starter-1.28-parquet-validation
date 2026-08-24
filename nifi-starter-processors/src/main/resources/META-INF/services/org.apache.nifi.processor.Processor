@@ -14,3 +14,4 @@
 # limitations under the License.
 org.example.nifi.processors.TransformContentProcessor
 org.example.nifi.processors.ValidateParquet
+org.example.nifi.processors.FilterParquet
