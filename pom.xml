@@ -116,6 +116,67 @@
                 <type>nar</type>
             </dependency>
 
+            <!--
+              NiFi's record API. provided, like nifi-api: nifi-standard-services-api-nar is this
+              bundle's parent NAR and already puts these on the parent classloader, so bundling
+              them would shadow the framework's own copies.
+            -->
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-record-serialization-service-api</artifactId>
+                <version>${nifi.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-record</artifactId>
+                <version>${nifi.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-schema-registry-service-api</artifactId>
+                <version>${nifi.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- Test only: mock reader and writer services. -->
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-mock-record-utils</artifactId>
+                <version>${nifi.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <!--
+              Test only: NiFi's real ParquetReader and ParquetRecordSetWriter, so the filtering
+              can be exercised end to end against genuine Parquet rather than only against mocks.
+              At runtime these come from NiFi's own nifi-parquet-nar, never from this bundle.
+            -->
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-parquet-processors</artifactId>
+                <version>${nifi.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <!--
+              Test only: nifi-parquet-processors shares a base class with NiFi's HDFS processors,
+              whose static initialiser references these service APIs. Real NiFi has them on the
+              parent classloader; a TestRunner does not, so they have to be on the test classpath
+              for the parquet services to load at all.
+            -->
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-kerberos-credentials-service-api</artifactId>
+                <version>${nifi.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-kerberos-user-service-api</artifactId>
+                <version>${nifi.version}</version>
+                <scope>test</scope>
+            </dependency>
+
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-simple</artifactId>

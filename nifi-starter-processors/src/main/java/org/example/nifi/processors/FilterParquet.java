@@ -16,16 +16,16 @@
  */
 package org.example.nifi.processors;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -34,34 +34,31 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.stream.io.StreamUtils;
-import org.apache.parquet.ParquetReadOptions;
-import org.apache.parquet.avro.AvroParquetReader;
-import org.apache.parquet.avro.AvroParquetWriter;
-import org.apache.parquet.avro.AvroSchemaConverter;
-import org.apache.parquet.conf.ParquetConfiguration;
-import org.apache.parquet.conf.PlainParquetConfiguration;
-import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.hadoop.ParquetReader;
-import org.apache.parquet.hadoop.ParquetWriter;
-import org.apache.parquet.hadoop.metadata.CompressionCodecName;
-import org.apache.parquet.hadoop.metadata.BlockMetaData;
-import org.apache.parquet.hadoop.metadata.ParquetMetadata;
-import org.apache.parquet.io.InputFile;
-import org.apache.parquet.schema.MessageType;
+import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.schema.access.SchemaNotFoundException;
+import org.apache.nifi.serialization.MalformedRecordException;
+import org.apache.nifi.serialization.RecordReader;
+import org.apache.nifi.serialization.RecordReaderFactory;
+import org.apache.nifi.serialization.RecordSetWriter;
+import org.apache.nifi.serialization.RecordSetWriterFactory;
+import org.apache.nifi.serialization.WriteResult;
+import org.apache.nifi.serialization.record.Record;
+import org.apache.nifi.serialization.record.RecordSchema;
 
-@Tags({"parquet", "filter", "validate", "avro", "record"})
-@CapabilityDescription("Writes a copy of an incoming Parquet file with the rows that fail "
-        + "validation left out. The rules are the same ones ValidateParquet applies, and are "
-        + "compiled in rather than configurable. Every column is carried through; only rows are "
-        + "removed. Note that the output is a freshly encoded file, not a copy of the input with "
-        + "rows deleted, so its row group layout and encodings are chosen by this processor.")
+@Tags({"parquet", "record", "filter", "validate"})
+@CapabilityDescription("Writes a copy of an incoming record set with the rows that fail validation "
+        + "left out. Reading and writing are delegated to the configured Record Reader and Record "
+        + "Writer, so pairing a ParquetReader with a ParquetRecordSetWriter filters a Parquet "
+        + "file, and any other pairing works the same way. The rules are the ones ValidateParquet "
+        + "applies and are compiled in rather than configurable. Every field is carried through: "
+        + "only rows are removed.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -71,13 +68,33 @@ import org.apache.parquet.schema.MessageType;
         @WritesAttribute(attribute = FilterParquet.ROWS_KEPT_ATTRIBUTE,
                 description = "Rows written to the outgoing file"),
         @WritesAttribute(attribute = FilterParquet.ROWS_REMOVED_ATTRIBUTE,
-                description = "Rows left out because they failed validation")
+                description = "Rows left out because they failed validation"),
+        @WritesAttribute(attribute = "mime.type",
+                description = "Set from the configured Record Writer")
 })
 public class FilterParquet extends AbstractProcessor {
 
     static final String ROWS_READ_ATTRIBUTE = "parquet.filter.rows.read";
     static final String ROWS_KEPT_ATTRIBUTE = "parquet.filter.rows.kept";
     static final String ROWS_REMOVED_ATTRIBUTE = "parquet.filter.rows.removed";
+
+    public static final PropertyDescriptor RECORD_READER = new PropertyDescriptor.Builder()
+            .name("Record Reader")
+            .displayName("Record Reader")
+            .description("Service used to read the incoming file. Use a ParquetReader to filter "
+                    + "Parquet.")
+            .identifiesControllerService(RecordReaderFactory.class)
+            .required(true)
+            .build();
+
+    public static final PropertyDescriptor RECORD_WRITER = new PropertyDescriptor.Builder()
+            .name("Record Writer")
+            .displayName("Record Writer")
+            .description("Service used to write the filtered copy. Use a ParquetRecordSetWriter "
+                    + "to keep the output in Parquet.")
+            .identifiesControllerService(RecordSetWriterFactory.class)
+            .required(true)
+            .build();
 
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
@@ -91,14 +108,20 @@ public class FilterParquet extends AbstractProcessor {
 
     public static final Relationship REL_FAILURE = new Relationship.Builder()
             .name("failure")
-            .description("FlowFiles that could not be filtered: content that is not readable as "
-                    + "Parquet, or whose schema is missing a field the rules need")
+            .description("FlowFiles that could not be filtered, because the reader could not parse "
+                    + "them or the schema is missing a field the rules need")
             .build();
+
+    private static final List<PropertyDescriptor> PROPERTIES =
+            Collections.unmodifiableList(Arrays.asList(RECORD_READER, RECORD_WRITER));
 
     private static final Set<Relationship> RELATIONSHIPS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_ORIGINAL, REL_FAILURE)));
 
-    private final ParquetConfiguration parquetConfiguration = new PlainParquetConfiguration();
+    @Override
+    public List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return PROPERTIES;
+    }
 
     @Override
     public Set<Relationship> getRelationships() {
@@ -112,117 +135,75 @@ public class FilterParquet extends AbstractProcessor {
             return;
         }
 
-        try {
-            final byte[] content = readContent(session, original);
-            final InputFile inputFile =
-                    new ByteArrayInputFile(content, original.getAttribute(CoreAttributes.UUID.key()));
+        final RecordReaderFactory readerFactory =
+                context.getProperty(RECORD_READER).asControllerService(RecordReaderFactory.class);
+        final RecordSetWriterFactory writerFactory =
+                context.getProperty(RECORD_WRITER).asControllerService(RecordSetWriterFactory.class);
 
-            final ParquetMetadata footer = readFooter(inputFile);
-            final MessageType parquetSchema = footer.getFileMetaData().getSchema();
+        final Map<String, String> originalAttributes = original.getAttributes();
+        final AtomicLong rowsRead = new AtomicLong();
+        final AtomicLong rowsKept = new AtomicLong();
+        final Map<String, String> writeAttributes = new HashMap<>();
 
-            for (final String field : Item.FIELDS) {
-                if (!parquetSchema.containsField(field)) {
-                    // Without every field the rules cannot be evaluated, so there is no defensible
-                    // way to decide which rows to drop. Refusing beats silently keeping everything.
-                    getLogger().error("Cannot filter {}, schema is missing the {} field",
-                            new Object[] {original, field});
-                    session.transfer(session.penalize(original), REL_FAILURE);
-                    return;
-                }
-            }
+        FlowFile filtered = session.create(original);
+        try (InputStream in = session.read(original);
+             RecordReader reader = readerFactory.createRecordReader(
+                     originalAttributes, in, original.getSize(), getLogger())) {
 
-            final AtomicLong rowsRead = new AtomicLong();
-            final AtomicLong rowsKept = new AtomicLong();
+            // Check the reader's schema, not the writer's: the rules run against the records the
+            // reader produces, and a writer is free to report a different (or empty) schema.
+            requireRuleFields(reader.getSchema());
+            final RecordSchema schema = writerFactory.getSchema(originalAttributes, reader.getSchema());
 
-            FlowFile filtered = session.create(original);
             filtered = session.write(filtered, out -> {
-                try (ParquetWriter<GenericRecord> writer = AvroParquetWriter
-                        .<GenericRecord>builder(new FlowFileOutputFile(out))
-                        // Carrying the Parquet schema across rather than an Avro one of our own
-                        // keeps every column, including ones the rules never look at.
-                        .withSchema(new AvroSchemaConverter().convert(parquetSchema))
-                        .withDataModel(GenericData.get())
-                        .withConf(parquetConfiguration)
-                        .withCompressionCodec(codecOf(footer))
-                        .withRowGroupSize(rowGroupSizeOf(footer))
-                        .build();
-                     ParquetReader<GenericRecord> reader = AvroParquetReader
-                             .<GenericRecord>builder(inputFile, parquetConfiguration)
-                             .withDataModel(GenericData.get())
-                             .build()) {
+                try (RecordSetWriter writer = writerFactory.createWriter(getLogger(), schema, out, original)) {
+                    writer.beginRecordSet();
 
-                    GenericRecord record;
-                    while ((record = reader.read()) != null) {
+                    Record record;
+                    while ((record = reader.nextRecord()) != null) {
                         rowsRead.incrementAndGet();
                         if (Item.from(record).isValid()) {
                             writer.write(record);
                             rowsKept.incrementAndGet();
                         }
                     }
+
+                    final WriteResult result = writer.finishRecordSet();
+                    writeAttributes.putAll(result.getAttributes());
+                    writeAttributes.put(CoreAttributes.MIME_TYPE.key(), writer.getMimeType());
+                } catch (final MalformedRecordException | SchemaNotFoundException e) {
+                    throw new ProcessException("Could not filter " + original, e);
                 }
             });
-
-            final long removed = rowsRead.get() - rowsKept.get();
-            filtered = session.putAttribute(filtered, ROWS_READ_ATTRIBUTE, Long.toString(rowsRead.get()));
-            filtered = session.putAttribute(filtered, ROWS_KEPT_ATTRIBUTE, Long.toString(rowsKept.get()));
-            filtered = session.putAttribute(filtered, ROWS_REMOVED_ATTRIBUTE, Long.toString(removed));
-
-            session.transfer(filtered, REL_SUCCESS);
-            session.transfer(original, REL_ORIGINAL);
-            getLogger().debug("Filtered {}: kept {} of {} rows",
-                    new Object[] {original, rowsKept.get(), rowsRead.get()});
         } catch (final Exception e) {
-            // As in ValidateParquet, content that is not Parquet arrives as a bare RuntimeException
-            // from parquet-java, so this cannot be narrowed usefully.
             getLogger().error("Failed to filter {}", new Object[] {original}, e);
+            session.remove(filtered);
             session.transfer(session.penalize(original), REL_FAILURE);
+            return;
         }
-    }
 
-    private byte[] readContent(final ProcessSession session, final FlowFile flowFile) throws IOException {
-        final byte[] content = new byte[(int) flowFile.getSize()];
-        try (InputStream in = session.read(flowFile)) {
-            StreamUtils.fillBuffer(in, content, true);
-        }
-        return content;
-    }
+        final long removed = rowsRead.get() - rowsKept.get();
+        writeAttributes.put(ROWS_READ_ATTRIBUTE, Long.toString(rowsRead.get()));
+        writeAttributes.put(ROWS_KEPT_ATTRIBUTE, Long.toString(rowsKept.get()));
+        writeAttributes.put(ROWS_REMOVED_ATTRIBUTE, Long.toString(removed));
 
-    private ParquetMetadata readFooter(final InputFile inputFile) throws IOException {
-        final ParquetReadOptions options = ParquetReadOptions.builder(parquetConfiguration).build();
-        try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
-            return reader.getFooter();
-        }
-    }
-
-    /**
-     * Reuses whatever codec the incoming file was written with. Without this the writer would fall
-     * back to its own default and a SNAPPY or ZSTD file would come out uncompressed, which can
-     * make the filtered copy larger than the original it was meant to shrink.
-     */
-    private static CompressionCodecName codecOf(final ParquetMetadata footer) {
-        if (footer.getBlocks().isEmpty() || footer.getBlocks().get(0).getColumns().isEmpty()) {
-            return CompressionCodecName.UNCOMPRESSED;
-        }
-        return footer.getBlocks().get(0).getColumns().get(0).getCodec();
+        filtered = session.putAllAttributes(filtered, writeAttributes);
+        session.transfer(filtered, REL_SUCCESS);
+        session.transfer(original, REL_ORIGINAL);
+        session.adjustCounter("Rows Removed", removed, false);
+        getLogger().debug("Filtered {}: kept {} of {} rows",
+                new Object[] {original, rowsKept.get(), rowsRead.get()});
     }
 
     /**
-     * Matches the incoming file's row group sizing. Row groups are what a downstream reader splits
-     * and skips on, and the writer holds one in memory before flushing it, so inheriting the
-     * default here would turn a file of many small row groups into a single large one and quietly
-     * change both the read characteristics and this processor's own memory ceiling.
+     * Without every field the rules cannot be evaluated, so there is no defensible way to decide
+     * which rows to drop. Refusing beats silently keeping everything.
      */
-    private static long rowGroupSizeOf(final ParquetMetadata footer) {
-        if (footer.getBlocks().isEmpty()) {
-            return ParquetWriter.DEFAULT_BLOCK_SIZE;
+    private static void requireRuleFields(final RecordSchema schema) throws SchemaNotFoundException {
+        for (final String field : Item.FIELDS) {
+            if (!schema.getField(field).isPresent()) {
+                throw new SchemaNotFoundException("Schema is missing the " + field + " field");
+            }
         }
-        long uncompressed = 0;
-        for (final BlockMetaData block : footer.getBlocks()) {
-            uncompressed += block.getTotalByteSize();
-        }
-        // No floor. Imposing a minimum here would quietly consolidate a file that was written
-        // with small row groups, which is a re-tuning decision this processor has no business
-        // making: it was asked to remove rows, not to reorganise the file.
-        return Math.max(1L, uncompressed / footer.getBlocks().size());
     }
 }

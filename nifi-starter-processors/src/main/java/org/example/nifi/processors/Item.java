@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.avro.generic.GenericRecord;
+import org.apache.nifi.serialization.record.Record;
 
 /**
  * One item out of a Parquet file: the id, name and status that ValidateParquet's rules work on.
@@ -89,6 +90,27 @@ final class Item {
     /** True when the id column held a non-numeric value, for instance a string typed column. */
     boolean idNonNumeric() {
         return idNonNumeric;
+    }
+
+    /**
+     * Reads one item out of a NiFi Record, as produced by any configured RecordReader.
+     *
+     * <p>Unlike the Avro path this needs no Utf8 handling, because the record API has already
+     * normalised values into plain Java types. The id is still read as a raw value rather than
+     * through getAsLong, so that a non-numeric column is reported as a broken rule instead of
+     * throwing on coercion.
+     */
+    static Item from(final Record record) {
+        final Object rawId = record.getValue(ID);
+        return new Item(
+                rawId instanceof Number ? ((Number) rawId).longValue() : null,
+                asString(record.getValue(NAME)),
+                asString(record.getValue(STATUS)),
+                rawId != null && !(rawId instanceof Number));
+    }
+
+    private static String asString(final Object value) {
+        return value == null ? null : value.toString();
     }
 
     /**
