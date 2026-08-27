@@ -80,21 +80,37 @@ final class ParquetFooterRewriter {
     }
 
     /**
-     * The metadata a filtered copy should carry: everything the incoming file had, except that the
-     * keys describing the encoding of the actual bytes are taken from the file being copied.
+     * The metadata a filtered copy should carry: exactly what the incoming file carried.
      *
-     * <p>The distinction matters when the writer service is configured with a different schema from
-     * the input's. Inheriting the input's {@code parquet.avro.schema} in that case would leave the
-     * footer describing a schema the data does not have.
+     * <p>Because {@code end(Map)} writes the footer wholesale, the copy can be made byte-for-byte
+     * identical in metadata to its input, including inheriting nothing at all. A file written by
+     * Spark, which carries neither {@code parquet.avro.schema} nor {@code writer.model.name}, comes
+     * out still carrying neither, rather than picking them up from the writer that produced the
+     * copy.
+     *
+     * <p>The single exception is a key that would otherwise make the footer lie. If the incoming
+     * file declared an Avro schema and the copy was written with a different one, the copy's is
+     * used, because a footer describing a schema the data does not have is worse than a footer that
+     * differs from the input's. That only happens when the Record Writer is configured with an
+     * explicit schema rather than inheriting the reader's, and the caller is told about it.
+     *
+     * @param conflicts populated with any key whose value had to be taken from the copy
      */
-    static Map<String, String> merge(final Map<String, String> inherited, final Map<String, String> written) {
-        final Map<String, String> merged = new LinkedHashMap<>();
-        for (final Map.Entry<String, String> entry : inherited.entrySet()) {
+    static Map<String, String> merge(final Map<String, String> inherited, final Map<String, String> written,
+            final Map<String, String> conflicts) {
+        final Map<String, String> merged = new LinkedHashMap<>(inherited);
+
+        for (final Map.Entry<String, String> entry : written.entrySet()) {
             if (!ParquetFileMetadata.isWriterGenerated(entry.getKey())) {
+                continue;
+            }
+            final String inheritedValue = inherited.get(entry.getKey());
+            // Absent upstream means absent downstream: adding it would not be "the same metadata".
+            if (inheritedValue != null && !inheritedValue.equals(entry.getValue())) {
                 merged.put(entry.getKey(), entry.getValue());
+                conflicts.put(entry.getKey(), entry.getValue());
             }
         }
-        merged.putAll(written);
         return merged;
     }
 }

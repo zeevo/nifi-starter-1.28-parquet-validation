@@ -23,7 +23,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -206,12 +206,15 @@ public class FilterParquet extends AbstractProcessor {
             final byte[] writtenContent = readContent(session, written);
             final ByteArrayInputFile writtenFile = new ByteArrayInputFile(
                     writtenContent, written.getAttribute(CoreAttributes.UUID.key()));
+            final Map<String, String> conflicts = new LinkedHashMap<>();
             final Map<String, String> merged = ParquetFooterRewriter.merge(inherited,
-                    ParquetFileMetadata.read(writtenFile, PARQUET_CONFIGURATION).all());
-            // Only the keys actually carried over from the incoming file, which is what the
-            // attribute claims to report. The writer generated ones come from the copy itself.
-            final Set<String> inheritedKeys = new LinkedHashSet<>(merged.keySet());
-            inheritedKeys.removeIf(ParquetFileMetadata::isWriterGenerated);
+                    ParquetFileMetadata.read(writtenFile, PARQUET_CONFIGURATION).all(), conflicts);
+            if (!conflicts.isEmpty()) {
+                getLogger().warn("{} was written with a different schema from the incoming file, so "
+                        + "{} could not be inherited verbatim. Configure the Record Writer to "
+                        + "inherit the record schema if the copy should match exactly.",
+                        new Object[] {original, conflicts.keySet()});
+            }
 
             filtered = session.create(original);
             filtered = session.write(filtered, out ->
@@ -224,7 +227,7 @@ public class FilterParquet extends AbstractProcessor {
             writeAttributes.put(ROWS_READ_ATTRIBUTE, Long.toString(rowsRead.get()));
             writeAttributes.put(ROWS_KEPT_ATTRIBUTE, Long.toString(rowsKept.get()));
             writeAttributes.put(ROWS_REMOVED_ATTRIBUTE, Long.toString(removed));
-            writeAttributes.put(METADATA_KEYS_ATTRIBUTE, String.join(",", inheritedKeys));
+            writeAttributes.put(METADATA_KEYS_ATTRIBUTE, String.join(",", merged.keySet()));
 
             filtered = session.putAllAttributes(filtered, writeAttributes);
             session.transfer(filtered, REL_SUCCESS);
