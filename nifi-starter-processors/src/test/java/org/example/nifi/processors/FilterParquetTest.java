@@ -28,6 +28,8 @@ import java.util.List;
 
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.nifi.parquet.ParquetReader;
+import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -55,16 +57,18 @@ public class FilterParquetTest {
     private TestRunner runner;
 
     @BeforeEach
-    public void init() {
+    public void init() throws InitializationException {
         runner = TestRunners.newTestRunner(FilterParquet.class);
 
-// No controller services: this variant reads and writes Parquet itself.
+final ParquetReader reader = new ParquetReader();
+        runner.addControllerService("parquet-reader", reader);
+        runner.enableControllerService(reader);
+        runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
     }
 
     @Test
-    public void testNeedsNoConfiguration() {
-        assertTrue(TestRunners.newTestRunner(FilterParquet.class)
-                .getProcessor().getPropertyDescriptors().isEmpty());
+    public void testReaderIsRequired() {
+        TestRunners.newTestRunner(FilterParquet.class).assertNotValid();
         runner.assertValid();
     }
 
@@ -194,17 +198,17 @@ public class FilterParquetTest {
     }
 
     /**
-     * Reading Parquet directly sidesteps a NiFi 1.28.1 limitation: ParquetRecordReader reads the
-     * first record in its constructor to derive the schema and throws EOFException when there is
-     * none, so the record API cannot read a zero row file at all. parquet-java can, which means
-     * two of these can be chained even when everything gets filtered out.
+     * The cost of reading through the record API: ParquetRecordReader derives its schema by reading
+     * the first record and throws EOFException when there is none, so a zero row Parquet file
+     * cannot be read at all. This processor can produce one, so chaining two of them on data where
+     * everything fails puts the second on failure.
      */
     @Test
-    public void testZeroRowInputIsHandled() throws IOException {
-        final MockFlowFile out = filter("empty.parquet");
+    public void testZeroRowInputCannotBeReadByNifiParquetReader() throws IOException {
+        runner.enqueue(fixtureBytes("empty.parquet"));
+        runner.run();
 
-        assertCounts(out, 0, 0, 0);
-        assertEquals(0, readParquet(out.toByteArray()).size());
+        runner.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
     }
 
     private MockFlowFile filter(final String fixture) throws IOException {

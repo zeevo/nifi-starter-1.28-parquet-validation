@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.util.Map;
 
+import org.apache.nifi.parquet.ParquetReader;
+import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -43,9 +45,12 @@ public class FilterParquetMetadataTest {
     private TestRunner runner;
 
     @BeforeEach
-    public void init() {
+    public void init() throws InitializationException {
         runner = TestRunners.newTestRunner(FilterParquet.class);
-// No controller services: this variant reads and writes Parquet itself.
+final ParquetReader reader = new ParquetReader();
+        runner.addControllerService("parquet-reader", reader);
+        runner.enableControllerService(reader);
+        runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
     }
 
     /** The requirement: every custom key on the input is present on the copy, with the same value. */

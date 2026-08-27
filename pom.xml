@@ -139,6 +139,12 @@
                 <version>${nifi.version}</version>
                 <scope>provided</scope>
             </dependency>
+            <!-- Bundled, not provided: the parent NAR has no Avro utilities. -->
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-avro-record-utils</artifactId>
+                <version>${nifi.version}</version>
+            </dependency>
 
             <!-- Test only: mock reader and writer services. -->
             <dependency>
