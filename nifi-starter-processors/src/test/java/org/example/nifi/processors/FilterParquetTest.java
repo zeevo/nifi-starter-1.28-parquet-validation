@@ -17,250 +17,203 @@
 package org.example.nifi.processors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.nifi.parquet.ParquetReader;
 import org.apache.nifi.reporting.InitializationException;
-import org.apache.nifi.serialization.record.MockRecordParser;
-import org.apache.nifi.serialization.record.MockRecordWriter;
-import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The filtering rules, driven through mock reader and writer services.
+ * Filtering behaviour, driven through NiFi's real ParquetReader controller service.
  *
- * <p>Mocks keep these tests about which rows survive rather than about any one file format.
- * {@link FilterParquetRoundTripTest} covers the real Parquet services.
+ * <p>These cannot use a mock reader: the processor reads the incoming file's footer directly to
+ * pick up its metadata and encoding, so the content has to be genuine Parquet whatever reader is
+ * configured. {@link RecordApiMetadataLimitsTest} covers why that footer read is unavoidable and
+ * {@link FilterParquetMetadataTest} covers what it preserves.
+ *
+ * <p>Fixtures are the ones described in ValidateParquetTest, plus:
+ * <pre>
+ *   metadata-rich.parquet  1000 rows, SNAPPY, small row groups, a payload column no rule reads,
+ *                          four custom file-level metadata keys, every 10th row invalid
+ * </pre>
  */
 public class FilterParquetTest {
 
     private TestRunner runner;
-    private MockRecordParser reader;
 
     @BeforeEach
     public void init() throws InitializationException {
         runner = TestRunners.newTestRunner(FilterParquet.class);
 
-        reader = new MockRecordParser();
-        reader.addSchemaField(Item.ID, RecordFieldType.LONG);
-        reader.addSchemaField(Item.NAME, RecordFieldType.STRING);
-        reader.addSchemaField(Item.STATUS, RecordFieldType.STRING);
-        runner.addControllerService("reader", reader);
+        final ParquetReader reader = new ParquetReader();
+        runner.addControllerService("parquet-reader", reader);
         runner.enableControllerService(reader);
-
-        // header false, quote false: one plain comma separated line per record, easy to assert on.
-        final MockRecordWriter writer = new MockRecordWriter(null, false, false);
-        runner.addControllerService("writer", writer);
-        runner.enableControllerService(writer);
-
-        runner.setProperty(FilterParquet.RECORD_READER, "reader");
-        runner.setProperty(FilterParquet.RECORD_WRITER, "writer");
+        runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
+        runner.assertValid();
     }
 
     @Test
-    public void testReaderAndWriterAreRequired() {
-        final TestRunner bare = TestRunners.newTestRunner(FilterParquet.class);
-        bare.assertNotValid();
+    public void testReaderIsRequired() {
+        TestRunners.newTestRunner(FilterParquet.class).assertNotValid();
     }
 
     @Test
-    public void testAllRowsValidKeepsEverything() {
-        reader.addRecord(1L, "bob", "ACTIVE");
-        reader.addRecord(2L, "carol", "PENDING");
+    public void testValidFileKeepsEveryRow() throws IOException {
+        final MockFlowFile out = filter("valid.parquet");
 
-        final MockFlowFile out = filter();
         assertCounts(out, 2, 2, 0);
-        assertEquals(2, lines(out).size());
+        final List<GenericRecord> rows = readParquet(out.toByteArray());
+        assertEquals(2, rows.size());
+        assertEquals("bob", rows.get(0).get("name").toString());
+        assertEquals("carol", rows.get(1).get("name").toString());
     }
 
     /** The stated example: name null but status present survives. */
     @Test
-    public void testNullNameWithStatusSurvives() {
-        reader.addRecord(1L, null, "ACTIVE");
-
-        assertCounts(filter(), 1, 1, 0);
+    public void testNullNameWithStatusSurvives() throws IOException {
+        assertCounts(filter("valid-null-name.parquet"), 1, 1, 0);
     }
 
     @Test
-    public void testNullStatusWithNameSurvives() {
-        reader.addRecord(1L, "bob", null);
-
-        assertCounts(filter(), 1, 1, 0);
+    public void testNullStatusWithNameSurvives() throws IOException {
+        assertCounts(filter("valid-null-status.parquet"), 1, 1, 0);
     }
 
     @Test
-    public void testNullIdIsRemoved() {
-        reader.addRecord(null, "bob", "ACTIVE");
-
-        assertCounts(filter(), 1, 0, 1);
+    public void testNullIdIsRemoved() throws IOException {
+        assertCounts(filter("invalid-null-id.parquet"), 1, 0, 1);
     }
 
     @Test
-    public void testNonPositiveIdIsRemoved() {
-        reader.addRecord(0L, "bob", "ACTIVE");
-
-        assertCounts(filter(), 1, 0, 1);
+    public void testNonPositiveIdIsRemoved() throws IOException {
+        assertCounts(filter("invalid-zero-id.parquet"), 1, 0, 1);
     }
 
     @Test
-    public void testNameAndStatusBothNullIsRemoved() {
-        reader.addRecord(1L, null, null);
-
-        assertCounts(filter(), 1, 0, 1);
+    public void testNameAndStatusBothNullIsRemoved() throws IOException {
+        assertCounts(filter("invalid-both-null.parquet"), 1, 0, 1);
     }
 
     @Test
-    public void testBlankNameIsRemoved() {
-        reader.addRecord(1L, "   ", "ACTIVE");
-
-        assertCounts(filter(), 1, 0, 1);
+    public void testBlankNameIsRemoved() throws IOException {
+        assertCounts(filter("invalid-blank-name.parquet"), 1, 0, 1);
     }
 
     @Test
-    public void testDisallowedStatusIsRemoved() {
-        reader.addRecord(1L, "bob", "BOGUS");
-
-        assertCounts(filter(), 1, 0, 1);
-    }
-
-    /** Only the failing rows go, and the survivors keep their order and values. */
-    @Test
-    public void testOnlyFailingRowsAreRemoved() {
-        reader.addRecord(1L, "keep-one", "ACTIVE");
-        reader.addRecord(0L, "drop-bad-id", "ACTIVE");
-        reader.addRecord(2L, "keep-two", "PENDING");
-        reader.addRecord(3L, null, null);
-        reader.addRecord(4L, "keep-three", "INACTIVE");
-
-        final MockFlowFile out = filter();
-        assertCounts(out, 5, 3, 2);
-
-        final List<String> lines = lines(out);
-        assertEquals(3, lines.size());
-        assertTrue(lines.get(0).contains("keep-one"), lines.get(0));
-        assertTrue(lines.get(1).contains("keep-two"), lines.get(1));
-        assertTrue(lines.get(2).contains("keep-three"), lines.get(2));
-        assertTrue(out.getContent().indexOf("drop-bad-id") < 0, out.getContent());
+    public void testDisallowedStatusIsRemoved() throws IOException {
+        assertCounts(filter("invalid-bad-status.parquet"), 1, 0, 1);
     }
 
     @Test
-    public void testEveryRowRemovedStillProducesAFile() {
-        reader.addRecord(0L, "bad", "ACTIVE");
-        reader.addRecord(null, "bad", "ACTIVE");
+    public void testOnlyFailingRowsAreRemoved() throws IOException {
+        final MockFlowFile out = filter("invalid-many.parquet");
 
-        final MockFlowFile out = filter();
-        assertCounts(out, 2, 0, 2);
-        assertEquals(0, lines(out).size());
+        assertCounts(out, 20, 5, 15);
+        final List<GenericRecord> kept = readParquet(out.toByteArray());
+        assertEquals(5, kept.size());
+        for (int i = 0; i < kept.size(); i++) {
+            assertEquals((long) (i + 1), kept.get(i).get("id"));
+        }
+    }
+
+    /** The strongest statement of the contract: the output must satisfy ValidateParquet. */
+    @Test
+    public void testOutputPassesValidateParquet() throws IOException {
+        final MockFlowFile filtered = filter("invalid-many.parquet");
+
+        final TestRunner validator = TestRunners.newTestRunner(ValidateParquet.class);
+        validator.enqueue(filtered.toByteArray());
+        validator.run();
+
+        validator.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+        assertEquals("5", validator.getFlowFilesForRelationship(ValidateParquet.REL_VALID).get(0)
+                .getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+    }
+
+    /** A column no rule looks at still has to reach the copy. */
+    @Test
+    public void testUnrelatedColumnsAreCarriedThrough() throws IOException {
+        final MockFlowFile out = filter("metadata-rich.parquet");
+
+        assertCounts(out, 1000, 900, 100);
+        final List<GenericRecord> rows = readParquet(out.toByteArray());
+        assertEquals(4, rows.get(0).getSchema().getFields().size());
+        assertEquals("extra-column-not-touched-by-any-rule-1", rows.get(0).get("payload").toString());
     }
 
     @Test
-    public void testEmptyInputProducesEmptyOutput() {
-        assertCounts(filter(), 0, 0, 0);
-    }
+    public void testEveryRowRemovedStillProducesReadableParquet() throws IOException {
+        final MockFlowFile out = filter("invalid-zero-id.parquet");
 
-    /** A field the rules never look at still has to reach the output. */
-    @Test
-    public void testUnrelatedFieldsAreCarriedThrough() throws InitializationException {
-        final TestRunner extra = TestRunners.newTestRunner(FilterParquet.class);
-        final MockRecordParser wide = new MockRecordParser();
-        wide.addSchemaField(Item.ID, RecordFieldType.LONG);
-        wide.addSchemaField(Item.NAME, RecordFieldType.STRING);
-        wide.addSchemaField(Item.STATUS, RecordFieldType.STRING);
-        wide.addSchemaField("payload", RecordFieldType.STRING);
-        wide.addRecord(1L, "bob", "ACTIVE", "carry-me");
-        wide.addRecord(0L, "bad", "ACTIVE", "drop-me");
-        extra.addControllerService("reader", wide);
-        extra.enableControllerService(wide);
-        final MockRecordWriter writer = new MockRecordWriter(null, false, false);
-        extra.addControllerService("writer", writer);
-        extra.enableControllerService(writer);
-        extra.setProperty(FilterParquet.RECORD_READER, "reader");
-        extra.setProperty(FilterParquet.RECORD_WRITER, "writer");
-
-        extra.enqueue(new byte[0]);
-        extra.run();
-
-        extra.assertTransferCount(FilterParquet.REL_SUCCESS, 1);
-        final MockFlowFile out = extra.getFlowFilesForRelationship(FilterParquet.REL_SUCCESS).get(0);
-        assertTrue(out.getContent().contains("carry-me"), out.getContent());
-        assertTrue(out.getContent().indexOf("drop-me") < 0, out.getContent());
-    }
-
-    /** Without every field the rules cannot run, so filtering is refused rather than guessed at. */
-    @Test
-    public void testMissingRuleFieldRoutesToFailure() throws InitializationException {
-        final TestRunner narrow = TestRunners.newTestRunner(FilterParquet.class);
-        final MockRecordParser noStatus = new MockRecordParser();
-        noStatus.addSchemaField(Item.ID, RecordFieldType.LONG);
-        noStatus.addSchemaField(Item.NAME, RecordFieldType.STRING);
-        noStatus.addRecord(1L, "bob");
-        narrow.addControllerService("reader", noStatus);
-        narrow.enableControllerService(noStatus);
-        final MockRecordWriter writer = new MockRecordWriter(null, false, false);
-        narrow.addControllerService("writer", writer);
-        narrow.enableControllerService(writer);
-        narrow.setProperty(FilterParquet.RECORD_READER, "reader");
-        narrow.setProperty(FilterParquet.RECORD_WRITER, "writer");
-
-        narrow.enqueue(new byte[0]);
-        narrow.run();
-
-        narrow.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
-        // The half written copy must not escape.
-        narrow.assertTransferCount(FilterParquet.REL_SUCCESS, 0);
+        assertEquals(0, readParquet(out.toByteArray()).size());
     }
 
     @Test
-    public void testUnparseableInputRoutesToFailure() throws InitializationException {
-        final TestRunner broken = TestRunners.newTestRunner(FilterParquet.class);
-        final MockRecordParser thrower = new MockRecordParser();
-        thrower.failAfter(0);
-        thrower.addSchemaField(Item.ID, RecordFieldType.LONG);
-        thrower.addSchemaField(Item.NAME, RecordFieldType.STRING);
-        thrower.addSchemaField(Item.STATUS, RecordFieldType.STRING);
-        thrower.addRecord(1L, "bob", "ACTIVE");
-        broken.addControllerService("reader", thrower);
-        broken.enableControllerService(thrower);
-        final MockRecordWriter writer = new MockRecordWriter(null, false, false);
-        broken.addControllerService("writer", writer);
-        broken.enableControllerService(writer);
-        broken.setProperty(FilterParquet.RECORD_READER, "reader");
-        broken.setProperty(FilterParquet.RECORD_WRITER, "writer");
-
-        broken.enqueue(new byte[0]);
-        broken.run();
-
-        broken.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
-        broken.assertTransferCount(FilterParquet.REL_SUCCESS, 0);
-    }
-
-    @Test
-    public void testOriginalIsForwardedUnchanged() {
-        reader.addRecord(1L, "bob", "ACTIVE");
-
-        runner.enqueue("the original bytes");
+    public void testOriginalIsForwardedUnchanged() throws IOException {
+        final byte[] content = fixtureBytes("valid.parquet");
+        runner.enqueue(content);
         runner.run();
 
         runner.assertTransferCount(FilterParquet.REL_ORIGINAL, 1);
-        runner.getFlowFilesForRelationship(FilterParquet.REL_ORIGINAL).get(0)
-                .assertContentEquals("the original bytes");
+        runner.getFlowFilesForRelationship(FilterParquet.REL_ORIGINAL).get(0).assertContentEquals(content);
     }
 
     @Test
-    public void testMimeTypeComesFromTheWriter() {
-        reader.addRecord(1L, "bob", "ACTIVE");
-
-        assertEquals("text/plain", filter().getAttribute("mime.type"));
+    public void testMimeTypeIsParquet() throws IOException {
+        assertEquals("application/parquet", filter("valid.parquet").getAttribute("mime.type"));
     }
 
-    private MockFlowFile filter() {
-        runner.enqueue(new byte[0]);
+    @Test
+    public void testMissingRuleFieldRoutesToFailure() throws IOException {
+        runner.enqueue(fixtureBytes("missing-status-column.parquet"));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
+        runner.assertTransferCount(FilterParquet.REL_SUCCESS, 0);
+    }
+
+    @Test
+    public void testNonParquetContentRoutesToFailure() {
+        runner.enqueue("hello".getBytes(StandardCharsets.UTF_8));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
+        runner.assertTransferCount(FilterParquet.REL_SUCCESS, 0);
+        runner.getFlowFilesForRelationship(FilterParquet.REL_FAILURE).get(0).assertContentEquals("hello");
+    }
+
+    /**
+     * A NiFi 1.28.1 limitation rather than one of ours: ParquetRecordReader reads the first record
+     * in its constructor to derive the schema and throws EOFException when there is none, so a
+     * zero row Parquet file cannot be read through the record API at all. It matters because this
+     * processor can produce such a file, so chaining two of them on data where everything fails
+     * puts the second one on failure.
+     */
+    @Test
+    public void testZeroRowInputCannotBeReadByNifiParquetReader() throws IOException {
+        runner.enqueue(fixtureBytes("empty.parquet"));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
+    }
+
+    private MockFlowFile filter(final String fixture) throws IOException {
+        runner.enqueue(fixtureBytes(fixture));
         runner.run();
 
         runner.assertTransferCount(FilterParquet.REL_SUCCESS, 1);
@@ -274,14 +227,25 @@ public class FilterParquetTest {
         assertEquals(Long.toString(removed), out.getAttribute(FilterParquet.ROWS_REMOVED_ATTRIBUTE));
     }
 
-    /** MockRecordWriter emits one line per record, so the surviving rows are countable. */
-    private static List<String> lines(final MockFlowFile out) {
-        final List<String> lines = new ArrayList<>();
-        for (final String line : out.getContent().split("\n")) {
-            if (!line.trim().isEmpty()) {
-                lines.add(line);
+    static List<GenericRecord> readParquet(final byte[] content) throws IOException {
+        final List<GenericRecord> rows = new ArrayList<>();
+        try (org.apache.parquet.hadoop.ParquetReader<GenericRecord> reader = AvroParquetReader
+                .<GenericRecord>builder(new ByteArrayInputFile(content, "filtered"),
+                        new PlainParquetConfiguration())
+                .withDataModel(GenericData.get())
+                .build()) {
+            GenericRecord record;
+            while ((record = reader.read()) != null) {
+                rows.add(record);
             }
         }
-        return lines;
+        return rows;
+    }
+
+    static byte[] fixtureBytes(final String fixture) throws IOException {
+        try (InputStream in = FilterParquetTest.class.getResourceAsStream("/parquet/" + fixture)) {
+            assertNotNull(in, "missing fixture " + fixture);
+            return in.readAllBytes();
+        }
     }
 }
