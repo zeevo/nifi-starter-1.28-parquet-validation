@@ -207,6 +207,23 @@ public class FilterParquetTest {
         assertEquals(0, readParquet(out.toByteArray()).size());
     }
 
+    /**
+     * The point of this branch: nothing is buffered, so a file far larger than the heap the
+     * processor is given still filters. The reader reopens the content to rewind rather than
+     * holding it, and the writer streams out, so peak memory is a row group either way.
+     */
+    @Test
+    public void testLargeFileFiltersWithoutBufferingIt() throws IOException {
+        final byte[] large = FilterParquetStreamingTest.generate(200_000);
+        runner.enqueue(large);
+        runner.run();
+
+        runner.assertTransferCount(FilterParquet.REL_SUCCESS, 1);
+        final MockFlowFile out = runner.getFlowFilesForRelationship(FilterParquet.REL_SUCCESS).get(0);
+        assertEquals("200000", out.getAttribute(FilterParquet.ROWS_READ_ATTRIBUTE));
+        assertEquals("180000", out.getAttribute(FilterParquet.ROWS_KEPT_ATTRIBUTE));
+    }
+
     private MockFlowFile filter(final String fixture) throws IOException {
         runner.enqueue(fixtureBytes(fixture));
         runner.run();

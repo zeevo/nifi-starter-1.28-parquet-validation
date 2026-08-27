@@ -17,7 +17,6 @@
 package org.example.nifi.processors;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,7 +40,6 @@ import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
@@ -112,9 +110,10 @@ public class FilterParquet extends AbstractProcessor {
 
         FlowFile filtered = null;
         try {
-            final byte[] content = readContent(session, original);
-            final InputFile inputFile =
-                    new ByteArrayInputFile(content, original.getAttribute(CoreAttributes.UUID.key()));
+            // Streams the content instead of buffering it. FlowFileInputFile hands out a fresh
+            // handle per newStream() and rewinds by reopening, so the footer read and the row read
+            // each get their own, and peak memory is a row group rather than the whole file.
+            final InputFile inputFile = new FlowFileInputFile(session, original);
             final ParquetFileMetadata metadata =
                     ParquetFileMetadata.read(inputFile, PARQUET_CONFIGURATION);
 
@@ -170,11 +169,4 @@ public class FilterParquet extends AbstractProcessor {
         }
     }
 
-    private static byte[] readContent(final ProcessSession session, final FlowFile flowFile) throws IOException {
-        final byte[] content = new byte[(int) flowFile.getSize()];
-        try (InputStream in = session.read(flowFile)) {
-            StreamUtils.fillBuffer(in, content, true);
-        }
-        return content;
-    }
 }
