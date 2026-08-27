@@ -113,6 +113,11 @@ final class Item {
         return value == null ? null : value.toString();
     }
 
+    /** Exposed so the pushdown predicate can apply the same allow list. */
+    static boolean isAllowedStatus(final String status) {
+        return ALLOWED_STATUSES.contains(status);
+    }
+
     /**
      * The business rules, hardcoded on purpose. They live here rather than on a processor so that
      * validating a file and filtering one cannot drift apart: both ask the item the same question.

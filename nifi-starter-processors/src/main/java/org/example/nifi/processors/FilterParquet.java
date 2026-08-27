@@ -44,6 +44,7 @@ import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.conf.ParquetConfiguration;
+import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.ParquetWriter;
@@ -54,13 +55,17 @@ import org.apache.parquet.io.InputFile;
         + "validation left out, preserving the file's file-level key/value metadata exactly along "
         + "with its compression codec and row group sizing. Reads and writes Parquet with "
         + "parquet-java directly, so there is nothing to configure and no controller service to "
-        + "wire up. Every column is carried through: only rows are removed.")
+        + "wire up. The rules are pushed into the reader as a Parquet predicate, so row groups and "
+        + "pages that cannot contain a passing row are skipped without being decoded. Every column "
+        + "is carried through: only rows are removed.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
 @WritesAttributes({
         @WritesAttribute(attribute = FilterParquet.ROWS_READ_ATTRIBUTE,
-                description = "Rows read from the incoming file"),
+                description = "Rows in the incoming file, taken from its footer. Under predicate "
+                        + "pushdown the skipped rows are never decoded, so this is not a count of "
+                        + "rows actually examined."),
         @WritesAttribute(attribute = FilterParquet.ROWS_KEPT_ATTRIBUTE,
                 description = "Rows written to the outgoing file"),
         @WritesAttribute(attribute = FilterParquet.ROWS_REMOVED_ATTRIBUTE,
@@ -136,19 +141,26 @@ public class FilterParquet extends AbstractProcessor {
                      ParquetReader<GenericRecord> reader = AvroParquetReader
                              .<GenericRecord>builder(inputFile, PARQUET_CONFIGURATION)
                              .withDataModel(GenericData.get())
+                             // The rules go to the reader, which drops the failing rows before
+                             // they reach us. Statistics and column index filtering let it skip
+                             // whole row groups and pages that cannot contain a passing row.
+                             .withFilter(FilterCompat.get(ItemPredicate.keepValidRows()))
+                             .useStatsFilter(true)
+                             .useRecordFilter(true)
+                             .useColumnIndexFilter(true)
                              .build()) {
 
                     GenericRecord record;
                     while ((record = reader.read()) != null) {
-                        counts[0]++;
-                        if (Item.from(record).isValid()) {
-                            writer.write(record);
-                            counts[1]++;
-                        }
+                        writer.write(record);
+                        counts[1]++;
                     }
                 }
             });
 
+            // Rows the reader skipped are never seen, so the read total comes from the footer
+            // rather than from counting. It is the only way to report it under pushdown.
+            counts[0] = metadata.rowCount();
             final long removed = counts[0] - counts[1];
             final Map<String, String> attributes = new HashMap<>();
             attributes.put(ROWS_READ_ATTRIBUTE, Long.toString(counts[0]));
