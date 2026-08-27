@@ -63,15 +63,6 @@
             <artifactId>nifi-schema-registry-service-api</artifactId>
             <scope>provided</scope>
         </dependency>
-        <!--
-          AvroTypeUtil, for turning a NiFi Record back into an Avro GenericRecord. Not on the
-          parent classloader (nifi-standard-services-api-nar ships the record API but no Avro
-          utilities), so unlike the three above this one is bundled.
-        -->
-        <dependency>
-            <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-avro-record-utils</artifactId>
-        </dependency>
 
         <!-- Parquet, and the Hadoop it needs at runtime. See the root pom for why. -->
         <dependency>

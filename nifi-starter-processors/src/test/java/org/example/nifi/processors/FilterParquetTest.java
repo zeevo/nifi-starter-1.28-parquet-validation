@@ -29,6 +29,8 @@ import java.util.List;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.parquet.ParquetReader;
+import org.apache.nifi.parquet.ParquetRecordSetWriter;
+import org.apache.nifi.schema.access.SchemaAccessUtils;
 import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
@@ -64,6 +66,15 @@ public class FilterParquetTest {
         runner.addControllerService("parquet-reader", reader);
         runner.enableControllerService(reader);
         runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
+
+        // Inherit the incoming file's schema rather than pinning one, so a fixture with an extra
+        // column is written back with that column.
+        final ParquetRecordSetWriter writer = new ParquetRecordSetWriter();
+        runner.addControllerService("parquet-writer", writer);
+        runner.setProperty(writer, SchemaAccessUtils.SCHEMA_ACCESS_STRATEGY,
+                SchemaAccessUtils.INHERIT_RECORD_SCHEMA);
+        runner.enableControllerService(writer);
+        runner.setProperty(FilterParquet.RECORD_WRITER, "parquet-writer");
         runner.assertValid();
     }
 

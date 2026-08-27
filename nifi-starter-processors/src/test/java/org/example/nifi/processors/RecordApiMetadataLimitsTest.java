@@ -144,6 +144,50 @@ public class RecordApiMetadataLimitsTest {
         assertEquals("avro", written.get("writer.model.name"));
     }
 
+    /**
+     * The way out. ParquetFileWriter.end takes the whole metadata map, so unlike
+     * withExtraMetaData there is no reserved key to dodge: the reserved keys can be passed
+     * straight through. That is what lets the RecordSetWriter produce the file and the metadata be
+     * applied afterwards.
+     */
+    @Test
+    public void testFooterRewriteAcceptsEvenTheReservedKeys() throws IOException {
+        final byte[] plain = writeWith(Collections_emptyMap());
+
+        final Map<String, String> everything = new LinkedHashMap<>(metadataOf(plain));
+        everything.put("source.system", "billing");
+
+        final ByteArrayOutputStream stitched = new ByteArrayOutputStream();
+        ParquetFooterRewriter.copyWithMetadata(new ByteArrayInputFile(plain, "plain"), stitched,
+                everything, new PlainParquetConfiguration());
+
+        final Map<String, String> after = metadataOf(stitched.toByteArray());
+        assertEquals("billing", after.get("source.system"));
+        assertEquals(everything.get("parquet.avro.schema"), after.get("parquet.avro.schema"));
+        assertEquals("avro", after.get("writer.model.name"));
+    }
+
+    /** And it is a byte copy of the row groups, not a re-encode: the data and layout are untouched. */
+    @Test
+    public void testFooterRewriteDoesNotReEncode() throws IOException {
+        final byte[] plain = writeWith(Collections_emptyMap());
+        final ParquetFileMetadata before =
+                ParquetFileMetadata.read(new ByteArrayInputFile(plain, "plain"), new PlainParquetConfiguration());
+
+        final ByteArrayOutputStream stitched = new ByteArrayOutputStream();
+        final int copied = ParquetFooterRewriter.copyWithMetadata(
+                new ByteArrayInputFile(plain, "plain"), stitched,
+                metadataOf(plain), new PlainParquetConfiguration());
+
+        final ParquetFileMetadata after = ParquetFileMetadata.read(
+                new ByteArrayInputFile(stitched.toByteArray(), "stitched"), new PlainParquetConfiguration());
+
+        assertEquals(1, copied);
+        assertEquals(before.rowCount(), after.rowCount());
+        assertEquals(before.codec(), after.codec());
+        assertEquals(before.avroSchema(), after.avroSchema());
+    }
+
     private static Map<String, String> Collections_emptyMap() {
         return new LinkedHashMap<>();
     }
