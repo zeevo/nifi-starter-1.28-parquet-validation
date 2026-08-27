@@ -25,8 +25,6 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -42,11 +40,8 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.stream.io.StreamUtils;
-import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
-import org.apache.parquet.hadoop.ParquetReader;
-import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.io.InputFile;
 
 @Tags({"parquet", "filter", "validate", "metadata"})
@@ -54,7 +49,9 @@ import org.apache.parquet.io.InputFile;
         + "validation left out, preserving the file's file-level key/value metadata exactly along "
         + "with its compression codec and row group sizing. Reads and writes Parquet with "
         + "parquet-java directly, so there is nothing to configure and no controller service to "
-        + "wire up. Every column is carried through: only rows are removed.")
+        + "wire up. Row groups containing no failing rows are copied across as bytes rather than "
+        + "re-encoded, so most of a mostly-clean file keeps its original encoding untouched. Every "
+        + "column is carried through: only rows are removed.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -68,6 +65,11 @@ import org.apache.parquet.io.InputFile;
         @WritesAttribute(attribute = FilterParquet.METADATA_KEYS_ATTRIBUTE,
                 description = "File-level metadata keys on the copy, comma separated. Identical to "
                         + "the incoming file's."),
+        @WritesAttribute(attribute = FilterParquet.ROW_GROUPS_COPIED_ATTRIBUTE,
+                description = "Row groups copied across as bytes because every row in them passed"),
+        @WritesAttribute(attribute = FilterParquet.ROW_GROUPS_REWRITTEN_ATTRIBUTE,
+                description = "Row groups that had to be decoded and re-encoded because they "
+                        + "contained a failing row"),
         @WritesAttribute(attribute = "mime.type", description = "application/parquet")
 })
 public class FilterParquet extends AbstractProcessor {
@@ -76,6 +78,8 @@ public class FilterParquet extends AbstractProcessor {
     static final String ROWS_KEPT_ATTRIBUTE = "parquet.filter.rows.kept";
     static final String ROWS_REMOVED_ATTRIBUTE = "parquet.filter.rows.removed";
     static final String METADATA_KEYS_ATTRIBUTE = "parquet.filter.metadata.keys.inherited";
+    static final String ROW_GROUPS_COPIED_ATTRIBUTE = "parquet.filter.rowgroups.copied";
+    static final String ROW_GROUPS_REWRITTEN_ATTRIBUTE = "parquet.filter.rowgroups.rewritten";
 
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
@@ -124,35 +128,19 @@ public class FilterParquet extends AbstractProcessor {
                 }
             }
 
-            final long[] counts = new long[2];
+            final SurgicalParquetFilter.Result[] holder = new SurgicalParquetFilter.Result[1];
             filtered = session.create(original);
-            filtered = session.write(filtered, out -> {
-                try (ParquetWriter<GenericRecord> writer = new ExactMetadataParquetWriter(
-                                new FlowFileOutputFile(out), metadata.avroSchema(), metadata.all())
-                        .withConf(PARQUET_CONFIGURATION)
-                        .withCompressionCodec(metadata.codec())
-                        .withRowGroupSize(Math.max(metadata.rowGroupSize(), 1L))
-                        .build();
-                     ParquetReader<GenericRecord> reader = AvroParquetReader
-                             .<GenericRecord>builder(inputFile, PARQUET_CONFIGURATION)
-                             .withDataModel(GenericData.get())
-                             .build()) {
+            filtered = session.write(filtered, out ->
+                    holder[0] = SurgicalParquetFilter.filter(
+                            inputFile, out, metadata, PARQUET_CONFIGURATION));
 
-                    GenericRecord record;
-                    while ((record = reader.read()) != null) {
-                        counts[0]++;
-                        if (Item.from(record).isValid()) {
-                            writer.write(record);
-                            counts[1]++;
-                        }
-                    }
-                }
-            });
-
-            final long removed = counts[0] - counts[1];
+            final SurgicalParquetFilter.Result result = holder[0];
+            final long removed = result.rowsRead - result.rowsKept;
             final Map<String, String> attributes = new HashMap<>();
-            attributes.put(ROWS_READ_ATTRIBUTE, Long.toString(counts[0]));
-            attributes.put(ROWS_KEPT_ATTRIBUTE, Long.toString(counts[1]));
+            attributes.put(ROWS_READ_ATTRIBUTE, Long.toString(result.rowsRead));
+            attributes.put(ROWS_KEPT_ATTRIBUTE, Long.toString(result.rowsKept));
+            attributes.put(ROW_GROUPS_COPIED_ATTRIBUTE, Integer.toString(result.rowGroupsCopied));
+            attributes.put(ROW_GROUPS_REWRITTEN_ATTRIBUTE, Integer.toString(result.rowGroupsRewritten));
             attributes.put(ROWS_REMOVED_ATTRIBUTE, Long.toString(removed));
             attributes.put(METADATA_KEYS_ATTRIBUTE, String.join(",", metadata.all().keySet()));
             attributes.put(CoreAttributes.MIME_TYPE.key(), "application/parquet");

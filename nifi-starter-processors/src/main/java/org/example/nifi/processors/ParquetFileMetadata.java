@@ -56,18 +56,24 @@ final class ParquetFileMetadata {
             new HashSet<>(Arrays.asList("parquet.avro.schema", "writer.model.name")));
 
     private final Map<String, String> keyValueMetadata;
+    private final MessageType parquetSchema;
     private final Schema avroSchema;
     private final CompressionCodecName codec;
     private final long rowGroupSize;
     private final long rowCount;
+    private final int rowGroupCount;
 
-    private ParquetFileMetadata(final Map<String, String> keyValueMetadata, final Schema avroSchema,
-            final CompressionCodecName codec, final long rowGroupSize, final long rowCount) {
+    private ParquetFileMetadata(final Map<String, String> keyValueMetadata,
+            final MessageType parquetSchema, final Schema avroSchema,
+            final CompressionCodecName codec, final long rowGroupSize, final long rowCount,
+            final int rowGroupCount) {
         this.keyValueMetadata = keyValueMetadata;
+        this.parquetSchema = parquetSchema;
         this.avroSchema = avroSchema;
         this.codec = codec;
         this.rowGroupSize = rowGroupSize;
         this.rowCount = rowCount;
+        this.rowGroupCount = rowGroupCount;
     }
 
     /** Reads the footer only. No row groups are decoded. */
@@ -98,10 +104,12 @@ final class ParquetFileMetadata {
 
         return new ParquetFileMetadata(
                 Collections.unmodifiableMap(all),
+                parquetSchema,
                 schema,
                 codecOf(footer),
                 footer.getBlocks().isEmpty() ? 0 : Math.max(1L, uncompressed / footer.getBlocks().size()),
-                rows);
+                rows,
+                footer.getBlocks().size());
     }
 
     /** Every key/value pair in the file's footer, including the writer generated ones. */
@@ -127,6 +135,11 @@ final class ParquetFileMetadata {
         return WRITER_GENERATED_KEYS.contains(key);
     }
 
+    /** The Parquet schema as the footer records it, needed to open a ParquetFileWriter. */
+    MessageType parquetSchema() {
+        return parquetSchema;
+    }
+
     Schema avroSchema() {
         return avroSchema;
     }
@@ -138,6 +151,10 @@ final class ParquetFileMetadata {
     /** Zero when the file has no row groups, in which case the writer default should be used. */
     long rowGroupSize() {
         return rowGroupSize;
+    }
+
+    int rowGroupCount() {
+        return rowGroupCount;
     }
 
     long rowCount() {
