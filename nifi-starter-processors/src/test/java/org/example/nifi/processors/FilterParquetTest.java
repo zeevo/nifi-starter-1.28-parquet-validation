@@ -28,7 +28,9 @@ import java.util.List;
 
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
+import org.example.nifi.services.StandardParquetSource;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.apache.parquet.avro.AvroParquetReader;
@@ -55,16 +57,18 @@ public class FilterParquetTest {
     private TestRunner runner;
 
     @BeforeEach
-    public void init() {
+    public void init() throws InitializationException {
         runner = TestRunners.newTestRunner(FilterParquet.class);
 
-// No controller services: this variant reads and writes Parquet itself.
+final StandardParquetSource source = new StandardParquetSource();
+        runner.addControllerService("parquet-source", source);
+        runner.enableControllerService(source);
+        runner.setProperty(FilterParquet.PARQUET_SOURCE, "parquet-source");
     }
 
     @Test
-    public void testNeedsNoConfiguration() {
-        assertTrue(TestRunners.newTestRunner(FilterParquet.class)
-                .getProcessor().getPropertyDescriptors().isEmpty());
+    public void testParquetSourceIsRequired() {
+        TestRunners.newTestRunner(FilterParquet.class).assertNotValid();
         runner.assertValid();
     }
 

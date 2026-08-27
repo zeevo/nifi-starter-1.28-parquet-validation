@@ -78,6 +78,15 @@
             <artifactId>nifi-mock</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+          Test only: the real StandardParquetSource, so the processor is exercised against the
+          service it will actually run with rather than a stub.
+        -->
+        <dependency>
+            <groupId>org.example</groupId>
+            <artifactId>nifi-starter-services</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>

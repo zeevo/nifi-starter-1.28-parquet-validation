@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -36,25 +37,28 @@ import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.avro.Schema;
+import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.stream.io.StreamUtils;
-import org.apache.parquet.avro.AvroParquetReader;
+import org.example.nifi.api.ParquetSource;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
-import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.ParquetWriter;
-import org.apache.parquet.io.InputFile;
+import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 
 @Tags({"parquet", "filter", "validate", "metadata"})
 @CapabilityDescription("Writes a copy of an incoming Parquet file with the rows that fail "
         + "validation left out, preserving the file's file-level key/value metadata exactly along "
         + "with its compression codec and row group sizing. Reads and writes Parquet with "
-        + "parquet-java directly, so there is nothing to configure and no controller service to "
-        + "wire up. Every column is carried through: only rows are removed.")
+        + "the configured ParquetSource service, so there is nothing to "
+        + "wire up beyond a ParquetSource service, which supplies both the rows and the "
+        + "file-level metadata in one contract. Every column is carried through: only rows are "
+        + "removed.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -77,6 +81,17 @@ public class FilterParquet extends AbstractProcessor {
     static final String ROWS_REMOVED_ATTRIBUTE = "parquet.filter.rows.removed";
     static final String METADATA_KEYS_ATTRIBUTE = "parquet.filter.metadata.keys.inherited";
 
+    public static final PropertyDescriptor PARQUET_SOURCE = new PropertyDescriptor.Builder()
+            .name("Parquet Source")
+            .displayName("Parquet Source")
+            .description("Service that opens the incoming Parquet content and exposes both its "
+                    + "rows and its file-level metadata. NiFi's own ParquetReader cannot do the "
+                    + "second, which is why this is a bundle-local service rather than a "
+                    + "RecordReaderFactory.")
+            .identifiesControllerService(ParquetSource.class)
+            .required(true)
+            .build();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
             .description("The filtered copy, containing only the rows that passed validation")
@@ -96,7 +111,14 @@ public class FilterParquet extends AbstractProcessor {
     private static final Set<Relationship> RELATIONSHIPS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_ORIGINAL, REL_FAILURE)));
 
+    private static final List<PropertyDescriptor> PROPERTIES = Collections.singletonList(PARQUET_SOURCE);
+
     private static final ParquetConfiguration PARQUET_CONFIGURATION = new PlainParquetConfiguration();
+
+    @Override
+    public List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return PROPERTIES;
+    }
 
     @Override
     public Set<Relationship> getRelationships() {
@@ -111,50 +133,55 @@ public class FilterParquet extends AbstractProcessor {
         }
 
         FlowFile filtered = null;
+        String metadataKeys = "";
         try {
+            final ParquetSource source =
+                    context.getProperty(PARQUET_SOURCE).asControllerService(ParquetSource.class);
             final byte[] content = readContent(session, original);
-            final InputFile inputFile =
-                    new ByteArrayInputFile(content, original.getAttribute(CoreAttributes.UUID.key()));
-            final ParquetFileMetadata metadata =
-                    ParquetFileMetadata.read(inputFile, PARQUET_CONFIGURATION);
-
-            for (final String field : Item.FIELDS) {
-                if (metadata.avroSchema().getField(field) == null) {
-                    throw new IOException("Schema is missing the " + field + " field");
-                }
-            }
 
             final long[] counts = new long[2];
             filtered = session.create(original);
-            filtered = session.write(filtered, out -> {
-                try (ParquetWriter<GenericRecord> writer = new ExactMetadataParquetWriter(
-                                new FlowFileOutputFile(out), metadata.avroSchema(), metadata.all())
-                        .withConf(PARQUET_CONFIGURATION)
-                        .withCompressionCodec(metadata.codec())
-                        .withRowGroupSize(Math.max(metadata.rowGroupSize(), 1L))
-                        .build();
-                     ParquetReader<GenericRecord> reader = AvroParquetReader
-                             .<GenericRecord>builder(inputFile, PARQUET_CONFIGURATION)
-                             .withDataModel(GenericData.get())
-                             .build()) {
+            try (ParquetSource.Handle handle =
+                    source.open(content, original.getAttribute(CoreAttributes.UUID.key()))) {
 
-                    GenericRecord record;
-                    while ((record = reader.read()) != null) {
-                        counts[0]++;
-                        if (Item.from(record).isValid()) {
-                            writer.write(record);
-                            counts[1]++;
-                        }
+                final Schema avroSchema = new Schema.Parser().parse(handle.avroSchema());
+                for (final String field : Item.FIELDS) {
+                    if (avroSchema.getField(field) == null) {
+                        throw new IOException("Schema is missing the " + field + " field");
                     }
                 }
-            });
+                // One contract, both halves: the rows below and the metadata handed to the writer.
+                final Map<String, String> fileMetadata = handle.fileMetadata();
+
+                filtered = session.write(filtered, out -> {
+                    try (ParquetWriter<GenericRecord> writer = new ExactMetadataParquetWriter(
+                                    new FlowFileOutputFile(out), avroSchema, fileMetadata)
+                            .withConf(PARQUET_CONFIGURATION)
+                            .withCompressionCodec(CompressionCodecName.valueOf(handle.compressionCodec()))
+                            .withRowGroupSize(Math.max(handle.rowGroupSize(), 1L))
+                            .build()) {
+
+                        Object row;
+                        while ((row = handle.nextRecord()) != null) {
+                            counts[0]++;
+                            final GenericRecord record = (GenericRecord) row;
+                            if (Item.from(record).isValid()) {
+                                writer.write(record);
+                                counts[1]++;
+                            }
+                        }
+                    }
+                });
+
+                metadataKeys = String.join(",", fileMetadata.keySet());
+            }
 
             final long removed = counts[0] - counts[1];
             final Map<String, String> attributes = new HashMap<>();
             attributes.put(ROWS_READ_ATTRIBUTE, Long.toString(counts[0]));
             attributes.put(ROWS_KEPT_ATTRIBUTE, Long.toString(counts[1]));
             attributes.put(ROWS_REMOVED_ATTRIBUTE, Long.toString(removed));
-            attributes.put(METADATA_KEYS_ATTRIBUTE, String.join(",", metadata.all().keySet()));
+            attributes.put(METADATA_KEYS_ATTRIBUTE, metadataKeys);
             attributes.put(CoreAttributes.MIME_TYPE.key(), "application/parquet");
 
             filtered = session.putAllAttributes(filtered, attributes);

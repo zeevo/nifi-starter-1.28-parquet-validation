@@ -28,6 +28,19 @@
     <description>Controller service implementations</description>
 
     <dependencies>
+        <!-- The Parquet reading this service exists to provide. -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-avro</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-runtime</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>nifi-starter-api</artifactId>
