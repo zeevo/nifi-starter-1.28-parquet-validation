@@ -24,10 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.util.Map;
 
-import org.apache.nifi.parquet.ParquetReader;
-import org.apache.nifi.parquet.ParquetRecordSetWriter;
-import org.apache.nifi.schema.access.SchemaAccessUtils;
-import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -47,21 +43,9 @@ public class FilterParquetMetadataTest {
     private TestRunner runner;
 
     @BeforeEach
-    public void init() throws InitializationException {
+    public void init() {
         runner = TestRunners.newTestRunner(FilterParquet.class);
-        final ParquetReader reader = new ParquetReader();
-        runner.addControllerService("parquet-reader", reader);
-        runner.enableControllerService(reader);
-        runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
-
-        // Inherit the incoming file's schema rather than pinning one, so a fixture with an extra
-        // column is written back with that column.
-        final ParquetRecordSetWriter writer = new ParquetRecordSetWriter();
-        runner.addControllerService("parquet-writer", writer);
-        runner.setProperty(writer, SchemaAccessUtils.SCHEMA_ACCESS_STRATEGY,
-                SchemaAccessUtils.INHERIT_RECORD_SCHEMA);
-        runner.enableControllerService(writer);
-        runner.setProperty(FilterParquet.RECORD_WRITER, "parquet-writer");
+// No controller services: this variant reads and writes Parquet itself.
     }
 
     /** The requirement: every custom key on the input is present on the copy, with the same value. */
@@ -119,36 +103,30 @@ public class FilterParquetMetadataTest {
 
         assertEquals("parquet.avro.schema,writer.model.name",
                 out.getAttribute(FilterParquet.METADATA_KEYS_ATTRIBUTE));
+
         final Map<String, String> after = metadataOf(out.toByteArray());
         assertEquals("avro", after.get("writer.model.name"));
         assertNotNull(after.get("parquet.avro.schema"));
     }
 
-    /**
-     * The cost of keeping the RecordSetWriter: the output's encoding comes from the writer service
-     * configuration, not from the incoming file. The metadata travels, the compression does not.
-     * Configure the ParquetRecordSetWriter to match if that matters.
-     */
+    /** Reading and writing Parquet directly means the encoding can be inherited too. */
     @Test
-    public void testEncodingComesFromTheWriterServiceNotTheInput() throws IOException {
+    public void testCompressionCodecIsInherited() throws IOException {
         final ParquetFileMetadata before = read(fixtureBytes("metadata-rich.parquet"));
         final ParquetFileMetadata after = read(filter("metadata-rich.parquet").toByteArray());
 
         assertEquals(CompressionCodecName.SNAPPY, before.codec());
-        // Not inherited: this is the writer service default, and asserting it keeps the tradeoff
-        // visible rather than letting it be discovered in production.
-        assertEquals(CompressionCodecName.UNCOMPRESSED, after.codec());
+        assertEquals(before.codec(), after.codec());
     }
 
-    /** Same story for row group sizing: the writer service decides, so small groups consolidate. */
+    /** Row group sizing too, so a file of small row groups does not come back as one big one. */
     @Test
-    public void testRowGroupSizingComesFromTheWriterServiceNotTheInput() throws IOException {
+    public void testRowGroupSizingIsInherited() throws IOException {
         final long before = read(fixtureBytes("metadata-rich.parquet")).rowGroupSize();
         final long after = read(filter("metadata-rich.parquet").toByteArray()).rowGroupSize();
 
         assertTrue(before > 0, "fixture should have row groups");
-        assertTrue(after > before, "expected the writer service default to produce larger row groups, "
-                + "was " + before + " then " + after);
+        assertTrue(after < before * 3, "row group size ballooned from " + before + " to " + after);
     }
 
     /**

@@ -145,47 +145,31 @@ public class RecordApiMetadataLimitsTest {
     }
 
     /**
-     * The way out. ParquetFileWriter.end takes the whole metadata map, so unlike
-     * withExtraMetaData there is no reserved key to dodge: the reserved keys can be passed
-     * straight through. That is what lets the RecordSetWriter produce the file and the metadata be
-     * applied afterwards.
+     * The way out this branch takes: a WriteSupport whose WriteContext carries the caller's map and
+     * whose getName() is null, so the footer holds exactly what was asked for and nothing else.
+     * That is what makes copying a file with no Avro keys possible.
      */
     @Test
-    public void testFooterRewriteAcceptsEvenTheReservedKeys() throws IOException {
-        final byte[] plain = writeWith(Collections_emptyMap());
+    public void testExactMetadataWriterEmitsPreciselyWhatItIsGiven() throws IOException {
+        final Map<String, String> exact = new LinkedHashMap<>();
+        exact.put("org.apache.spark.version", "3.5.1");
+        exact.put("source.system", "billing");
 
-        final Map<String, String> everything = new LinkedHashMap<>(metadataOf(plain));
-        everything.put("source.system", "billing");
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ParquetWriter<GenericRecord> writer =
+                new ExactMetadataParquetWriter(new FlowFileOutputFile(out), SCHEMA, exact)
+                        .withConf(new PlainParquetConfiguration())
+                        .withCompressionCodec(CompressionCodecName.UNCOMPRESSED)
+                        .build()) {
+            final GenericRecord row = new GenericData.Record(SCHEMA);
+            row.put("id", 1L);
+            row.put("name", "bob");
+            row.put("status", "ACTIVE");
+            writer.write(row);
+        }
 
-        final ByteArrayOutputStream stitched = new ByteArrayOutputStream();
-        ParquetFooterRewriter.copyWithMetadata(new ByteArrayInputFile(plain, "plain"), stitched,
-                everything, new PlainParquetConfiguration());
-
-        final Map<String, String> after = metadataOf(stitched.toByteArray());
-        assertEquals("billing", after.get("source.system"));
-        assertEquals(everything.get("parquet.avro.schema"), after.get("parquet.avro.schema"));
-        assertEquals("avro", after.get("writer.model.name"));
-    }
-
-    /** And it is a byte copy of the row groups, not a re-encode: the data and layout are untouched. */
-    @Test
-    public void testFooterRewriteDoesNotReEncode() throws IOException {
-        final byte[] plain = writeWith(Collections_emptyMap());
-        final ParquetFileMetadata before =
-                ParquetFileMetadata.read(new ByteArrayInputFile(plain, "plain"), new PlainParquetConfiguration());
-
-        final ByteArrayOutputStream stitched = new ByteArrayOutputStream();
-        final int copied = ParquetFooterRewriter.copyWithMetadata(
-                new ByteArrayInputFile(plain, "plain"), stitched,
-                metadataOf(plain), new PlainParquetConfiguration());
-
-        final ParquetFileMetadata after = ParquetFileMetadata.read(
-                new ByteArrayInputFile(stitched.toByteArray(), "stitched"), new PlainParquetConfiguration());
-
-        assertEquals(1, copied);
-        assertEquals(before.rowCount(), after.rowCount());
-        assertEquals(before.codec(), after.codec());
-        assertEquals(before.avroSchema(), after.avroSchema());
+        // No parquet.avro.schema, no writer.model.name: precisely the two keys asked for.
+        assertEquals(exact, metadataOf(out.toByteArray()));
     }
 
     private static Map<String, String> Collections_emptyMap() {

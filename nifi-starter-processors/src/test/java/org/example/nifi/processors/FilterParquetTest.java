@@ -28,10 +28,6 @@ import java.util.List;
 
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.nifi.parquet.ParquetReader;
-import org.apache.nifi.parquet.ParquetRecordSetWriter;
-import org.apache.nifi.schema.access.SchemaAccessUtils;
-import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -59,28 +55,17 @@ public class FilterParquetTest {
     private TestRunner runner;
 
     @BeforeEach
-    public void init() throws InitializationException {
+    public void init() {
         runner = TestRunners.newTestRunner(FilterParquet.class);
 
-        final ParquetReader reader = new ParquetReader();
-        runner.addControllerService("parquet-reader", reader);
-        runner.enableControllerService(reader);
-        runner.setProperty(FilterParquet.RECORD_READER, "parquet-reader");
-
-        // Inherit the incoming file's schema rather than pinning one, so a fixture with an extra
-        // column is written back with that column.
-        final ParquetRecordSetWriter writer = new ParquetRecordSetWriter();
-        runner.addControllerService("parquet-writer", writer);
-        runner.setProperty(writer, SchemaAccessUtils.SCHEMA_ACCESS_STRATEGY,
-                SchemaAccessUtils.INHERIT_RECORD_SCHEMA);
-        runner.enableControllerService(writer);
-        runner.setProperty(FilterParquet.RECORD_WRITER, "parquet-writer");
-        runner.assertValid();
+// No controller services: this variant reads and writes Parquet itself.
     }
 
     @Test
-    public void testReaderIsRequired() {
-        TestRunners.newTestRunner(FilterParquet.class).assertNotValid();
+    public void testNeedsNoConfiguration() {
+        assertTrue(TestRunners.newTestRunner(FilterParquet.class)
+                .getProcessor().getPropertyDescriptors().isEmpty());
+        runner.assertValid();
     }
 
     @Test
@@ -209,18 +194,17 @@ public class FilterParquetTest {
     }
 
     /**
-     * A NiFi 1.28.1 limitation rather than one of ours: ParquetRecordReader reads the first record
-     * in its constructor to derive the schema and throws EOFException when there is none, so a
-     * zero row Parquet file cannot be read through the record API at all. It matters because this
-     * processor can produce such a file, so chaining two of them on data where everything fails
-     * puts the second one on failure.
+     * Reading Parquet directly sidesteps a NiFi 1.28.1 limitation: ParquetRecordReader reads the
+     * first record in its constructor to derive the schema and throws EOFException when there is
+     * none, so the record API cannot read a zero row file at all. parquet-java can, which means
+     * two of these can be chained even when everything gets filtered out.
      */
     @Test
-    public void testZeroRowInputCannotBeReadByNifiParquetReader() throws IOException {
-        runner.enqueue(fixtureBytes("empty.parquet"));
-        runner.run();
+    public void testZeroRowInputIsHandled() throws IOException {
+        final MockFlowFile out = filter("empty.parquet");
 
-        runner.assertAllFlowFilesTransferred(FilterParquet.REL_FAILURE, 1);
+        assertCounts(out, 0, 0, 0);
+        assertEquals(0, readParquet(out.toByteArray()).size());
     }
 
     private MockFlowFile filter(final String fixture) throws IOException {
