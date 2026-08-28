@@ -80,9 +80,6 @@ public class ValidateParquet extends AbstractProcessor {
     static final String INVALID_COUNT_ATTRIBUTE = "parquet.validation.invalid.count";
     static final String VIOLATIONS_ATTRIBUTE = "parquet.validation.violations";
 
-    private static final Set<String> ALLOWED_STATUSES = Collections.unmodifiableSet(
-            new HashSet<>(Arrays.asList("ACTIVE", "INACTIVE", "PENDING")));
-
     /** Keeps the violations attribute bounded on a file where every row is bad. */
     static final int MAX_REPORTED_VIOLATIONS = 10;
 
@@ -181,7 +178,7 @@ public class ValidateParquet extends AbstractProcessor {
             GenericRecord record;
             while ((record = reader.read()) != null) {
                 recordCount++;
-                final String violation = validateItem(Item.from(record));
+                final String violation = Item.from(record).violation();
                 if (violation != null) {
                     invalidCount++;
                     // Keep counting past the cap so invalid.count stays accurate.
@@ -201,35 +198,6 @@ public class ValidateParquet extends AbstractProcessor {
         try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
             return reader.getFileMetaData().getSchema();
         }
-    }
-
-    /**
-     * The business rules, hardcoded on purpose.
-     *
-     * @return the first rule the item breaks, or null if it passes
-     */
-    private static String validateItem(final Item item) {
-        if (item.idNonNumeric()) {
-            // A string or binary id column would otherwise look like a null id. Calling it out
-            // separately keeps a schema problem from being reported as a missing value.
-            return "id is not numeric";
-        }
-        if (item.id() == null) {
-            return "id is null";
-        }
-        if (item.id() <= 0) {
-            return "id must be positive";
-        }
-        if (item.name() == null && item.status() == null) {
-            return "name and status are both null";
-        }
-        if (item.name() != null && item.name().trim().isEmpty()) {
-            return "name is blank";
-        }
-        if (item.status() != null && !ALLOWED_STATUSES.contains(item.status())) {
-            return "status '" + item.status() + "' is not an allowed value";
-        }
-        return null;
     }
 
     /** Some parquet failures carry no message, in which case the type name is all we have. */
