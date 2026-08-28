@@ -18,7 +18,9 @@ package org.example.nifi.processors;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.avro.generic.GenericRecord;
 
@@ -41,6 +43,9 @@ final class Item {
 
     /** The fields the schema must declare before any item can be read out of it. */
     static final List<String> FIELDS = Collections.unmodifiableList(Arrays.asList(ID, NAME, STATUS));
+
+    private static final Set<String> ALLOWED_STATUSES = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList("ACTIVE", "INACTIVE", "PENDING")));
 
     private final Long id;
     private final String name;
@@ -84,6 +89,41 @@ final class Item {
     /** True when the id column held a non-numeric value, for instance a string typed column. */
     boolean idNonNumeric() {
         return idNonNumeric;
+    }
+
+    /**
+     * The business rules, hardcoded on purpose. They live here rather than on a processor so that
+     * validating a file and filtering one cannot drift apart: both ask the item the same question.
+     *
+     * @return the first rule this item breaks, or null if it passes
+     */
+    String violation() {
+        if (idNonNumeric) {
+            // A string or binary id column would otherwise look like a null id. Calling it out
+            // separately keeps a schema problem from being reported as a missing value.
+            return "id is not numeric";
+        }
+        if (id == null) {
+            return "id is null";
+        }
+        if (id <= 0) {
+            return "id must be positive";
+        }
+        if (name == null && status == null) {
+            return "name and status are both null";
+        }
+        if (name != null && name.trim().isEmpty()) {
+            return "name is blank";
+        }
+        if (status != null && !ALLOWED_STATUSES.contains(status)) {
+            return "status '" + status + "' is not an allowed value";
+        }
+        return null;
+    }
+
+    /** Convenience for the filtering path, which does not care which rule was broken. */
+    boolean isValid() {
+        return violation() == null;
     }
 
     /**
