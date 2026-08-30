@@ -24,9 +24,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.parquet.ParquetReadOptions;
+import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.column.Encoding;
 import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
@@ -40,9 +44,14 @@ import org.apache.parquet.io.LocalInputFile;
  * got, whether a dictionary was used, how the rows were divided into row groups, what ended up in
  * the footer. Reading that back is the only way to see them.
  *
- * <p>Everything here comes from the footer, so none of it decompresses a single page.
+ * <p>Everything except the row preview comes from the footer, so almost none of it decompresses a
+ * single page. The preview is worth the exception: for nested data the schema tells you the shape
+ * but not what a row actually looks like, and those are different questions.
  */
 public final class ParquetSummary {
+
+    /** Above this, a preview is noise rather than illustration. */
+    private static final int PREVIEW_ROW_LIMIT = 5;
 
     private ParquetSummary() {
     }
@@ -88,6 +97,8 @@ public final class ParquetSummary {
             }
         }
 
+        printRowPreview(file, rows);
+
         final Map<String, String> metadata =
                 new TreeMap<>(footer.getFileMetaData().getKeyValueMetaData());
         System.out.println("  file metadata " + (metadata.isEmpty() ? "(none)" : ""));
@@ -95,6 +106,27 @@ public final class ParquetSummary {
             System.out.printf("      %-22s %s%n", entry.getKey(), abbreviate(entry.getValue()));
         }
         System.out.println();
+    }
+
+    /**
+     * The first few rows, as Avro renders them. Only for small files: the point is to make a nested
+     * shape concrete, and 20,000 rows of it would not.
+     */
+    private static void printRowPreview(final Path file, final long rows) throws IOException {
+        if (rows == 0 || rows > PREVIEW_ROW_LIMIT) {
+            return;
+        }
+
+        System.out.println("  rows");
+        try (ParquetReader<GenericRecord> reader = AvroParquetReader
+                .<GenericRecord>builder(new LocalInputFile(file))
+                .withDataModel(GenericData.get())
+                .build()) {
+            GenericRecord record;
+            while ((record = reader.read()) != null) {
+                System.out.println("      " + record);
+            }
+        }
     }
 
     /**

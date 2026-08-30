@@ -86,13 +86,62 @@ public class SampleFilesTest {
         assertTrue(rows.stream().anyMatch(r -> r.get("id") == null), "expected a null id");
     }
 
-    /** Nested records must survive as a group with dotted leaf paths. */
+    /** Nested records become groups, and the leaves are named by their full path. */
     @Test
-    public void testNestedSampleHasAGroupColumn() throws IOException {
-        final String schema = footerOf(write("03-nested.parquet")).getFileMetaData().getSchema().toString();
+    public void testNestedSampleNestsTwoLevelsDeep() throws IOException {
+        final Path file = write("03-nested.parquet");
+        final String schema = footerOf(file).getFileMetaData().getSchema().toString();
 
-        assertTrue(schema.contains("group address"), schema);
-        assertTrue(schema.contains("postcode"), schema);
+        assertTrue(schema.contains("optional group address"), schema);
+        assertTrue(schema.contains("required group geo"), schema);
+
+        // A group holds no data itself, so only the leaves are columns, named by their path.
+        final List<String> columns = columnPathsOf(file);
+        assertTrue(columns.contains("address.geo.latitude"), columns.toString());
+        assertTrue(columns.contains("address.street"), columns.toString());
+        assertTrue(columns.stream().noneMatch(c -> c.equals("address")), columns.toString());
+    }
+
+    /**
+     * An absent record and a present record whose fields are null are different things, and the
+     * sample has to contain both or it does not demonstrate the distinction.
+     */
+    @Test
+    public void testNestedSampleDistinguishesAbsentFromNullFields() throws IOException {
+        final List<GenericRecord> rows = rowsOf(write("03-nested.parquet"));
+
+        assertEquals(3, rows.size());
+        assertTrue(rows.stream().anyMatch(r -> r.get("address") == null),
+                "expected a row with no address at all");
+
+        final GenericRecord present = (GenericRecord) rows.stream()
+                .map(r -> r.get("address"))
+                .filter(java.util.Objects::nonNull)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("expected a row with an address"));
+        assertNotNull(present.get("geo"), "a present address should carry its nested geo record");
+        assertTrue(rows.stream()
+                        .map(r -> (GenericRecord) r.get("address"))
+                        .filter(java.util.Objects::nonNull)
+                        .anyMatch(a -> a.get("postcode") == null),
+                "expected a present address with a null field");
+    }
+
+    /** An array of records is where nesting and repetition meet. */
+    @Test
+    public void testCollectionsSampleHasAnArrayOfRecords() throws IOException {
+        final Path file = write("04-collections.parquet");
+
+        assertTrue(columnPathsOf(file).contains("items.array.sku"), columnPathsOf(file).toString());
+
+        final List<GenericRecord> rows = rowsOf(file);
+        final List<?> firstItems = (List<?>) rows.get(0).get("items");
+        final List<?> lastItems = (List<?>) rows.get(rows.size() - 1).get("items");
+        assertEquals(1, firstItems.size());
+        // A varying count per row is the thing repetition levels encode.
+        assertTrue(lastItems.size() > firstItems.size(),
+                "expected a varying number of records per row");
+        assertNotNull(((GenericRecord) firstItems.get(0)).get("sku"));
     }
 
     /** Logical types must be annotated, not silently flattened to their physical type. */
@@ -166,6 +215,16 @@ public class SampleFilesTest {
                 System.setProperty(GenerateSampleParquetFiles.OUTPUT_PROPERTY, previous);
             }
         }
+    }
+
+    private static List<String> columnPathsOf(final Path file) throws IOException {
+        final List<String> paths = new ArrayList<>();
+        for (final BlockMetaData block : footerOf(file).getBlocks()) {
+            for (final org.apache.parquet.hadoop.metadata.ColumnChunkMetaData column : block.getColumns()) {
+                paths.add(String.join(".", column.getPath().toArray()));
+            }
+        }
+        return paths;
     }
 
     private Path write(final String fileName) throws IOException {

@@ -69,32 +69,67 @@ public final class Schemas {
     }
 
     /**
-     * A record inside a record. Parquet stores this as a group, and the leaf columns are named by
-     * their full path, which is why the summary prints things like {@code address.city}.
+     * Records inside records, two levels deep, with one of them optional.
+     *
+     * <p>Three things to look for in the output:
+     *
+     * <ul>
+     *   <li>Nesting is a <b>group</b> in Parquet, and leaf columns are named by their full path, so
+     *       this produces {@code address.geo.latitude} rather than a flattened column.</li>
+     *   <li>There is <b>no column for the group itself</b>. Only leaves hold data; a group is
+     *       structure.</li>
+     *   <li>{@code address} is <b>optional</b>, so a row can have no address at all. That is
+     *       different from having an address whose fields are null, and Parquet tells the two apart
+     *       with definition levels on the leaves underneath.</li>
+     * </ul>
      */
     public static Schema nested() {
-        return SchemaBuilder.record("Customer").namespace("org.example.parquet.sdk").fields()
-                .requiredLong("id")
-                .requiredString("name")
-                .name("address").type(
-                        SchemaBuilder.record("Address").namespace("org.example.parquet.sdk").fields()
-                                .requiredString("street")
-                                .requiredString("city")
-                                .optionalString("postcode")
-                                .endRecord())
-                .noDefault()
+        // The innermost record. Nesting is just a record used as a field type, so it composes to
+        // any depth.
+        final Schema geo = SchemaBuilder.record("Geo").namespace("org.example.parquet.sdk").fields()
+                .requiredDouble("latitude")
+                .requiredDouble("longitude")
                 .endRecord();
+
+        final Schema address = SchemaBuilder.record("Address").namespace("org.example.parquet.sdk").fields()
+                .requiredString("street")
+                .requiredString("city")
+                .optionalString("postcode")
+                .name("geo").type(geo).noDefault()
+                .endRecord();
+
+        // An optional record is a union of null and the record, exactly as with a primitive.
+        final Schema optionalAddress =
+                Schema.createUnion(Schema.create(Schema.Type.NULL), address);
+
+        return Schema.createRecord("Customer", null, "org.example.parquet.sdk", false,
+                Arrays.asList(
+                        new Schema.Field("id", Schema.create(Schema.Type.LONG), null, null),
+                        new Schema.Field("name", Schema.create(Schema.Type.STRING), null, null),
+                        new Schema.Field("address", optionalAddress,
+                                "absent entirely for some rows", Schema.Field.NULL_DEFAULT_VALUE)));
     }
 
     /**
-     * Repeated and keyed data. Both become three-level groups in Parquet, which is where repetition
-     * levels come from; the summary shows the leaf paths those expand into.
+     * Repeated and keyed data, including a repeated <b>record</b>.
+     *
+     * <p>An array of records is where nesting and repetition meet, and it is the shape most real
+     * data takes: an order with line items, a person with addresses. Parquet stores it as a
+     * repeated group, so the leaves come out as {@code items.array.sku} and carry repetition levels
+     * as well as definition levels.
      */
     public static Schema collections() {
+        final Schema lineItem = SchemaBuilder.record("LineItem").namespace("org.example.parquet.sdk").fields()
+                .requiredString("sku")
+                .requiredInt("quantity")
+                .optionalDouble("discount")
+                .endRecord();
+
         return SchemaBuilder.record("Order").namespace("org.example.parquet.sdk").fields()
                 .requiredLong("id")
                 .name("tags").type().array().items().stringType().noDefault()
                 .name("quantities").type().map().values().intType().noDefault()
+                .name("items").type().array().items(lineItem).noDefault()
                 .endRecord();
     }
 

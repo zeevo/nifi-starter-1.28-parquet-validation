@@ -36,8 +36,8 @@ it you can be looking at the output of an older version of the code.
 | --- | --- |
 | `01-primitives.parquet` | every Parquet physical type, all columns required |
 | `02-nullable.parquet` | optional columns with nulls actually present |
-| `03-nested.parquet` | a record inside a record, stored as a group |
-| `04-collections.parquet` | an array and a map, and the three level groups they become |
+| `03-nested.parquet` | records nested two deep, one optional and absent on a row |
+| `04-collections.parquet` | an array, a map, and an array of records with a varying count per row |
 | `05-logical-types.parquet` | date, timestamp, decimal, uuid and enum over primitives |
 | `06-uncompressed.parquet` | 20,000 rows, no compression, as a size baseline |
 | `07-snappy.parquet` | the same rows with SNAPPY |
@@ -63,9 +63,38 @@ it you can be looking at the output of an older version of the code.
 Compare `01` (`required int64`) with `02` (`optional int64`), and note the `RLE` encoding that
 appears in `02`: that is the definition levels recording which values are present.
 
-**Nested and repeated data become groups.** `03` produces `address.city` as a leaf column path.
-`04` produces `tags.array` and `quantities.key_value.key`, which is the three level list and map
-encoding the Parquet spec describes.
+**Records nest, to any depth.** A record is just a field type, so it composes. `03` is
+`Customer -> Address -> Geo`, and Parquet stores each level as a group:
+
+```
+optional group address {
+  required binary street (STRING);
+  ...
+  required group geo {
+    required double latitude;
+    required double longitude;
+  }
+}
+```
+
+Two things follow, both visible in the output. Leaf columns are named by their **full path**, so the
+column is `address.geo.latitude`. And there is **no column for a group itself**: groups are
+structure, only leaves hold data.
+
+**An absent record is not a record full of nulls.** `address` in `03` is optional, and the row
+preview shows both cases:
+
+```
+{"id": 2, ..., "address": {"street": "2 High Street", ..., "postcode": null, "geo": {...}}}
+{"id": 3, ..., "address": null}
+```
+
+Parquet tells those apart with definition levels on the leaves underneath, which is why the nested
+columns carry `RLE` encoding even where the leaf itself is required.
+
+**Arrays of records are where nesting and repetition meet.** `04` has `items`, an array of
+`LineItem`, with a different number per row. That produces `items.array.sku` and friends, and is the
+shape most real data takes: an order with line items, a person with addresses.
 
 **Logical types are annotations on a physical type.** In `05` a date is an `INT32 (DATE)`, a decimal
 is a `BINARY (DECIMAL(9,2))`, and a uuid is a `FIXED_LEN_BYTE_ARRAY(16) (UUID)`.
@@ -92,4 +121,4 @@ around, because plenty of code assumes at least one record exists.
 | `Schemas` | how each Avro schema is declared, and how it maps to Parquet |
 | `SampleFiles` | one method per sample, each demonstrating one thing |
 | `SampleWriter` | the `AvroParquetWriter` builder options, with notes on what each does |
-| `ParquetSummary` | reading a footer back: schema, row groups, per column encodings, metadata |
+| `ParquetSummary` | reading a footer back: schema, row groups, per column encodings, metadata, and a row preview for small files |

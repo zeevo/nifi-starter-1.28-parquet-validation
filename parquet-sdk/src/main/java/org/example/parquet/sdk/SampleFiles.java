@@ -51,10 +51,10 @@ public final class SampleFiles {
                     "optional columns, with nulls actually present",
                     SampleFiles::nullable),
             new Sample("03-nested.parquet",
-                    "a record inside a record, stored as a Parquet group",
+                    "records nested two deep, one of them optional and absent on a row",
                     SampleFiles::nested),
             new Sample("04-collections.parquet",
-                    "an array and a map, which become three level groups",
+                    "an array, a map, and an array of records with a varying number per row",
                     SampleFiles::collections),
             new Sample("05-logical-types.parquet",
                     "date, timestamp, decimal, uuid and enum over primitives",
@@ -162,19 +162,32 @@ public final class SampleFiles {
 
     private static void nested(final Path file) throws IOException {
         final Schema schema = Schemas.nested();
-        final Schema addressSchema = schema.getField("address").schema();
+        // A union's record branch is at index 1, since index 0 is null.
+        final Schema addressSchema = schema.getField("address").schema().getTypes().get(1);
+        final Schema geoSchema = addressSchema.getField("geo").schema();
 
         final List<GenericRecord> rows = new ArrayList<>();
         for (int i = 1; i <= 3; i++) {
-            final GenericRecord address = new GenericData.Record(addressSchema);
-            address.put("street", i + " High Street");
-            address.put("city", i % 2 == 0 ? "Leeds" : "Bristol");
-            address.put("postcode", i == 3 ? null : "AB" + i + " 1CD");
-
             final GenericRecord row = new GenericData.Record(schema);
             row.put("id", (long) i);
             row.put("name", "customer-" + i);
-            row.put("address", address);
+
+            if (i == 3) {
+                // No address at all, which is not the same as an address full of nulls.
+                row.put("address", null);
+            } else {
+                final GenericRecord geo = new GenericData.Record(geoSchema);
+                geo.put("latitude", 51.45 + i);
+                geo.put("longitude", -2.58 - i);
+
+                final GenericRecord address = new GenericData.Record(addressSchema);
+                address.put("street", i + " High Street");
+                address.put("city", i % 2 == 0 ? "Leeds" : "Bristol");
+                address.put("postcode", i == 2 ? null : "AB" + i + " 1CD");
+                address.put("geo", geo);
+
+                row.put("address", address);
+            }
             rows.add(row);
         }
         SampleWriter.write(file, schema, rows, SampleWriter.options());
@@ -182,6 +195,7 @@ public final class SampleFiles {
 
     private static void collections(final Path file) throws IOException {
         final Schema schema = Schemas.collections();
+        final Schema lineItemSchema = schema.getField("items").schema().getElementType();
         final List<GenericRecord> rows = new ArrayList<>();
 
         for (int i = 1; i <= 3; i++) {
@@ -189,11 +203,22 @@ public final class SampleFiles {
             quantities.put("widget", i);
             quantities.put("sprocket", i * 2);
 
+            // A different number of records per row, which is what repetition levels encode.
+            final List<GenericRecord> items = new ArrayList<>();
+            for (int line = 1; line <= i; line++) {
+                final GenericRecord item = new GenericData.Record(lineItemSchema);
+                item.put("sku", String.format("SKU-%03d", i * 10 + line));
+                item.put("quantity", line * 2);
+                item.put("discount", line == 1 ? null : 0.05 * line);
+                items.add(item);
+            }
+
             final GenericRecord row = new GenericData.Record(schema);
             row.put("id", (long) i);
             // An empty list is not the same as a null list; this shows the former.
             row.put("tags", i == 3 ? new ArrayList<String>() : Arrays.asList("alpha", "beta-" + i));
             row.put("quantities", quantities);
+            row.put("items", items);
             rows.add(row);
         }
         SampleWriter.write(file, schema, rows, SampleWriter.options());
