@@ -7,13 +7,23 @@ Nothing in the NAR depends on this module.
 
 ## Run it
 
+With mise, which supplies the Java 11 and Maven this repo pins:
+
+```bash
+mise run samples
+```
+
+Or directly, if your toolchain is already right:
+
 ```bash
 mvn compile exec:java@generate-sample-parquet-files -pl parquet-sdk
 ```
 
-Files land in `parquet-sdk/target/samples`. To keep them somewhere `mvn clean` will not remove:
+Files land in `parquet-sdk/target/samples`, which `mvn clean` removes. To write somewhere that
+survives a clean, pass the output directory:
 
 ```bash
+mise run samples -- -Dparquet.sdk.output=/tmp/samples
 mvn compile exec:java@generate-sample-parquet-files -pl parquet-sdk -Dparquet.sdk.output=/tmp/samples
 ```
 

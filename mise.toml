@@ -1,3 +1,10 @@
 [tools]
 java = "temurin-11.0.31+11"
 maven = "3.9.16"
+
+[tasks.samples]
+description = "Write the sample Parquet files and print what each one turned out to be"
+# The compile is deliberate: exec:java runs whatever is already in target/classes.
+# Pass extra Maven flags after --, for example:
+#   mise run samples -- -Dparquet.sdk.output=/tmp/samples
+run = "mvn compile exec:java@generate-sample-parquet-files -pl parquet-sdk"
