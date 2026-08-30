@@ -26,6 +26,15 @@
     <packaging>jar</packaging>
 
     <name>parquet-sdk</name>
+    <properties>
+        <!--
+          A Maven property, so -Dparquet.sdk.output=<dir> on the command line overrides it. Setting
+          the value directly in the plugin's systemProperties below would hardcode it and silently
+          ignore the flag.
+        -->
+        <parquet.sdk.output>${project.build.directory}/samples</parquet.sdk.output>
+    </properties>
+
     <description>
         Runnable examples that write sample Parquet files with parquet-java. Not part of the NAR:
         this is a learning and test-fixture tool, and nothing in the bundle depends on it.
@@ -107,11 +116,12 @@
                             <systemProperties>
                                 <!--
                                   Resolved by Maven, so the files land beside this module rather
-                                  than wherever the command happened to be run from.
+                                  than wherever the command happened to be run from, and so the
+                                  property above can override it.
                                 -->
                                 <systemProperty>
                                     <key>parquet.sdk.output</key>
-                                    <value>${project.build.directory}/samples</value>
+                                    <value>${parquet.sdk.output}</value>
                                 </systemProperty>
                                 <!-- parquet logs a line per row group at INFO; quieten it down. -->
                                 <systemProperty>
