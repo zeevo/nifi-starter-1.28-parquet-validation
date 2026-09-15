@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements. See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License. You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.example</groupId>
+        <artifactId>nifi-starter</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>parquet-sdk</artifactId>
+    <packaging>jar</packaging>
+
+    <name>parquet-sdk</name>
+    <properties>
+        <!--
+          A Maven property, so -Dparquet.sdk.output=<dir> on the command line overrides it. Setting
+          the value directly in the plugin's systemProperties below would hardcode it and silently
+          ignore the flag.
+        -->
+        <parquet.sdk.output>${project.build.directory}/samples</parquet.sdk.output>
+    </properties>
+
+    <description>
+        Runnable examples that write sample Parquet files with parquet-java. Not part of the NAR:
+        this is a learning and test-fixture tool, and nothing in the bundle depends on it.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-avro</artifactId>
+        </dependency>
+        <!--
+          parquet-hadoop reaches org.apache.hadoop.conf.Configuration and ParquetInputFormat's
+          FileInputFormat superclass even when nothing here touches a filesystem, and parquet
+          declares Hadoop as provided. See the root pom for the full explanation.
+        -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-runtime</artifactId>
+        </dependency>
+
+        <!--
+          The root pom manages slf4j-api as provided, because a NAR must not bundle it. This module
+          is a standalone program rather than part of the NAR, so it needs the real thing on its
+          runtime classpath, and a binding to go with it.
+        -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Run the generator with:
+
+                  mvn compile exec:java@generate-sample-parquet-files -pl parquet-sdk
+
+              The compile is not optional: exec:java runs whatever classes are already in
+              target/classes and will happily use stale ones.
+
+              The execution id is what the @ selects, so the goal can be invoked directly without
+              being bound to a lifecycle phase. Add -Dparquet.sdk.output=<dir> to write somewhere
+              other than the default.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>${exec.maven.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>generate-sample-parquet-files</id>
+                        <goals>
+                            <goal>java</goal>
+                        </goals>
+                        <configuration>
+                            <mainClass>org.example.parquet.sdk.GenerateSampleParquetFiles</mainClass>
+                            <systemProperties>
+                                <!--
+                                  Resolved by Maven, so the files land beside this module rather
+                                  than wherever the command happened to be run from, and so the
+                                  property above can override it.
+                                -->
+                                <systemProperty>
+                                    <key>parquet.sdk.output</key>
+                                    <value>${parquet.sdk.output}</value>
+                                </systemProperty>
+                                <!-- parquet logs a line per row group at INFO; quieten it down. -->
+                                <systemProperty>
+                                    <key>org.slf4j.simpleLogger.defaultLogLevel</key>
+                                    <value>warn</value>
+                                </systemProperty>
+                            </systemProperties>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

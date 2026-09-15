@@ -50,6 +50,7 @@
 
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
+        <exec.maven.plugin.version>3.6.3</exec.maven.plugin.version>
     </properties>
 
     <modules>
@@ -57,6 +58,7 @@
         <module>nifi-starter-services</module>
         <module>nifi-starter-processors</module>
         <module>nifi-starter-nar</module>
+        <module>parquet-sdk</module>
     </modules>
 
     <dependencyManagement>
@@ -120,7 +122,6 @@
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-simple</artifactId>
                 <version>${slf4j.version}</version>
-                <scope>test</scope>
             </dependency>
             <!--
               provided for the same reason as nifi-api: NiFi supplies slf4j-api from its own
