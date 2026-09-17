@@ -17,13 +17,16 @@
 package org.example.nifi.processors;
 
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.apache.avro.generic.GenericRecord;
 
 /**
- * One item out of a Parquet file: the id, name and status that ValidateParquet's rules work on.
+ * One item out of a Parquet file: the id, name and status that ValidateParquet's rules work on,
+ * plus the optional key column.
  *
  * <p>This is deliberately not a mapping of the whole file. A Parquet file may carry any number of
  * other columns and they are ignored, so adding a column upstream does not affect validation.
@@ -38,6 +41,7 @@ final class Item {
     static final String ID = "id";
     static final String NAME = "name";
     static final String STATUS = "status";
+    static final String KEY = "key";
 
     /** The fields the schema must declare before any item can be read out of it. */
     static final List<String> FIELDS = Collections.unmodifiableList(Arrays.asList(ID, NAME, STATUS));
@@ -46,12 +50,15 @@ final class Item {
     private final String name;
     private final String status;
     private final boolean idNonNumeric;
+    private final List<Key> keys;
 
-    private Item(final Long id, final String name, final String status, final boolean idNonNumeric) {
+    private Item(final Long id, final String name, final String status, final boolean idNonNumeric,
+            final List<Key> keys) {
         this.id = id;
         this.name = name;
         this.status = status;
         this.idNonNumeric = idNonNumeric;
+        this.keys = keys;
     }
 
     /**
@@ -65,7 +72,38 @@ final class Item {
                 rawId instanceof Number ? ((Number) rawId).longValue() : null,
                 text(record, NAME),
                 text(record, STATUS),
-                rawId != null && !(rawId instanceof Number));
+                rawId != null && !(rawId instanceof Number),
+                keys(record));
+    }
+
+    /**
+     * The values of the key column, in file order. Empty when the schema does not declare the
+     * column at all and when it declares it but the row holds null, since neither gives the rules
+     * anything to check.
+     *
+     * <p>A single value and an array of them both arrive here as a list, so a rule does not have to
+     * ask which shape the column had. That is the only thing flattened: each value keeps the form
+     * the file used, text or binary.
+     */
+    private static List<Key> keys(final GenericRecord record) {
+        // The record's own schema, not the file's, decides what get() may be asked for: it throws
+        // AvroRuntimeException for a field the schema does not declare. Unlike id, name and status
+        // the key column is optional, so a file without one reads exactly as it did before.
+        if (record.getSchema().getField(KEY) == null) {
+            return Collections.emptyList();
+        }
+
+        final Object value = record.get(KEY);
+        if (value == null) {
+            return Collections.emptyList();
+        }
+        if (value instanceof Collection) {
+            // GenericData.Array for an array column, whichever list encoding the file used.
+            return ((Collection<?>) value).stream()
+                    .map(Key::of)
+                    .collect(Collectors.toUnmodifiableList());
+        }
+        return Collections.singletonList(Key.of(value));
     }
 
     /** Null when the column was null, and also when it held something that is not a number. */
@@ -86,6 +124,11 @@ final class Item {
         return idNonNumeric;
     }
 
+    /** Every value the key column held, empty when it held none. Never null. */
+    List<Key> keys() {
+        return keys;
+    }
+
     /**
      * Avro hands back Utf8 rather than String unless the writer set avro.java.string, which files
      * from Spark, pyarrow and DuckDB do not, so casting to String would fail on most real files.
@@ -97,6 +140,6 @@ final class Item {
 
     @Override
     public String toString() {
-        return "Item[id=" + id + ", name=" + name + ", status=" + status + "]";
+        return "Item[id=" + id + ", name=" + name + ", status=" + status + ", keys=" + keys + "]";
     }
 }
