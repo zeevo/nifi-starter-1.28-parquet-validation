@@ -48,6 +48,12 @@
         <parquet.version>1.17.1</parquet.version>
         <hadoop.version>3.4.1</hadoop.version>
 
+        <!--
+          Pinned to the version avro 1.11.5 already brings in, so declaring it adds no jar to the
+          NAR and cannot drag avro's own jackson to a version it was not tested against.
+        -->
+        <jackson.version>2.14.3</jackson.version>
+
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
     </properties>
@@ -161,6 +167,18 @@
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-client-runtime</artifactId>
                 <version>${hadoop.version}</version>
+            </dependency>
+
+            <!--
+              Arrives transitively through avro either way. Declared because DetectParquetAttributes
+              writes JSON with it directly, and a dependency that is used directly should be asked
+              for directly. jackson-core only: writing a flat map of strings needs a generator, not
+              databind's object mapping.
+            -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
