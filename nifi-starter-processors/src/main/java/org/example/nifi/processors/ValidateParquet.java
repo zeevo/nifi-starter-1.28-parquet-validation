@@ -54,8 +54,11 @@ import org.apache.parquet.schema.MessageType;
 @CapabilityDescription("Validates a Parquet file carried as FlowFile content. The schema must "
         + "contain the fields id, name and status, and every record must satisfy a fixed set of "
         + "rules: id present, numeric and positive; at least one of name and status present; name "
-        + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. The "
-        + "rules are compiled in and are not configurable, so this processor has no properties. "
+        + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. A key "
+        + "column is optional, and a file without one validates as before. Where it is present it "
+        + "may hold text or 16 raw bytes, either singly or as an array, and may be null: text must "
+        + "not be blank, binary must be exactly 16 bytes, and a value that is neither is rejected. "
+        + "The rules are compiled in and are not configurable, so this processor has no properties. "
         + "Content is never modified, and is read straight from the content repository rather "
         + "than buffered, so memory use does not grow with the size of the file.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
@@ -85,6 +88,9 @@ public class ValidateParquet extends AbstractProcessor {
 
     /** Keeps the violations attribute bounded on a file where every row is bad. */
     static final int MAX_REPORTED_VIOLATIONS = 10;
+
+    /** How wide a binary key has to be. Text keys are not held to it: they are not these bytes. */
+    static final int KEY_BYTE_LENGTH = 16;
 
     public static final Relationship REL_VALID = new Relationship.Builder()
             .name("valid")
@@ -228,6 +234,38 @@ public class ValidateParquet extends AbstractProcessor {
         }
         if (item.status() != null && !ALLOWED_STATUSES.contains(item.status())) {
             return "status '" + item.status() + "' is not an allowed value";
+        }
+        return validateKeys(item.keys());
+    }
+
+    /**
+     * The rules for the key column, which holds no values at all when the schema does not declare
+     * it or the row is null. Text and binary are judged on their own terms rather than converted
+     * into each other, so the only thing both forms have to satisfy is being one of the two.
+     *
+     * <p>An array is reported by position. A column holding a single value is reported as plain
+     * "key", since an index would suggest a repetition the file did not have.
+     *
+     * @return the first rule a value breaks, or null if they all pass
+     */
+    private static String validateKeys(final List<Key> keys) {
+        for (int i = 0; i < keys.size(); i++) {
+            final Key key = keys.get(i);
+            final String field = keys.size() > 1 ? Item.KEY + "[" + i + "]" : Item.KEY;
+
+            if (key.isText()) {
+                if (key.text().trim().isEmpty()) {
+                    return field + " is blank";
+                }
+            } else if (key.isBinary()) {
+                if (key.bytes().length != KEY_BYTE_LENGTH) {
+                    return field + " is " + key.bytes().length + " bytes, not " + KEY_BYTE_LENGTH;
+                }
+            } else {
+                // A numeric column, or a null sitting inside an array. Saying so beats reporting it
+                // as a missing value, which is the same reason a non-numeric id is called out.
+                return field + " is neither text nor binary";
+            }
         }
         return null;
     }
