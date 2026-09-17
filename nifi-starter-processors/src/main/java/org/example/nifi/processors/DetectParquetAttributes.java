@@ -17,13 +17,18 @@
 package org.example.nifi.processors;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -32,11 +37,14 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.components.AllowableValue;
+import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
@@ -47,16 +55,18 @@ import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.io.InputFile;
 
 @Tags({"parquet", "metadata", "attributes", "footer", "schema"})
-@CapabilityDescription("Writes the file-level metadata of a Parquet file carried as FlowFile content "
-        + "to FlowFile attributes: the application that wrote it, its record and row group counts, "
-        + "its Parquet schema, and every key/value pair in its footer. Only the footer is read, so "
-        + "no column data is decompressed, and it is read straight from the content repository "
-        + "rather than buffered. What is extracted is fixed, so this processor has no properties. "
-        + "Content is never modified.")
+@CapabilityDescription("Reads the file-level metadata of a Parquet file carried as FlowFile content: "
+        + "the application that wrote it, its record and row group counts, its Parquet schema, and "
+        + "every key/value pair in its footer. Destination decides whether that lands in FlowFile "
+        + "attributes or replaces the content with a JSON object, and Attribute Subset narrows it "
+        + "to the names worth carrying. Only the footer is read, so no column data is decompressed, "
+        + "and it is read straight from the content repository rather than buffered.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
 @WritesAttributes({
+        // Everything but the error attribute is written only when Destination is attributes, and
+        // only when Attribute Subset does not filter it out.
         @WritesAttribute(attribute = DetectParquetAttributes.CREATED_BY_ATTRIBUTE,
                 description = "The application that wrote the file, for instance 'parquet-mr version "
                         + "1.17.1 (build ...)'. Not written when the footer does not record one."),
@@ -86,6 +96,43 @@ public class DetectParquetAttributes extends AbstractProcessor {
     static final String KEY_VALUE_ATTRIBUTE_PREFIX = "parquet.metadata.";
     static final String ERROR_ATTRIBUTE = "parquet.detection.error";
 
+    static final AllowableValue TO_ATTRIBUTES = new AllowableValue("attributes", "attributes",
+            "Write the metadata to FlowFile attributes and leave the content alone");
+
+    static final AllowableValue TO_CONTENT = new AllowableValue("content", "content",
+            "Replace the FlowFile content with a JSON object of the metadata");
+
+    public static final PropertyDescriptor DESTINATION = new PropertyDescriptor.Builder()
+            .name("Destination")
+            .displayName("Destination")
+            .description("Where the metadata is written. Writing to content replaces the Parquet "
+                    + "file with a JSON object of name and value pairs, so the file itself is gone "
+                    + "from the FlowFile: route a copy if it is still needed downstream.")
+            .required(true)
+            .allowableValues(TO_ATTRIBUTES, TO_CONTENT)
+            .defaultValue(TO_ATTRIBUTES.getValue())
+            .build();
+
+    public static final PropertyDescriptor ATTRIBUTE_SUBSET = new PropertyDescriptor.Builder()
+            .name("Attribute Subset")
+            .displayName("Attribute Subset")
+            .description("Comma separated list of names to keep, for instance "
+                    + "'parquet.record.count,parquet.metadata.source.system'. Names are matched "
+                    + "exactly against the full attribute name, so a footer key includes the "
+                    + "parquet.metadata. prefix. A name the file has nothing for is simply absent. "
+                    + "Left unset, everything found is written, which for a footer carrying a large "
+                    + "key such as parquet.avro.schema can be a lot of data to make every "
+                    + "downstream FlowFile carry. Applies to both destinations.")
+            .required(false)
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
+    private static final List<PropertyDescriptor> PROPERTIES =
+            Collections.unmodifiableList(Arrays.asList(DESTINATION, ATTRIBUTE_SUBSET));
+
+    /** JsonFactory is thread safe and meant to be shared, so one serves every invocation. */
+    private static final JsonFactory JSON = new JsonFactory();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
             .description("Parquet files whose metadata was written to attributes")
@@ -105,6 +152,11 @@ public class DetectParquetAttributes extends AbstractProcessor {
      * Configuration instead, which XML-parses core-default.xml on every call.
      */
     private final ParquetConfiguration parquetConfiguration = new PlainParquetConfiguration();
+
+    @Override
+    public List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return PROPERTIES;
+    }
 
     @Override
     public Set<Relationship> getRelationships() {
@@ -136,7 +188,15 @@ public class DetectParquetAttributes extends AbstractProcessor {
                 return;
             }
 
-            flowFile = session.putAllAttributes(flowFile, attributesOf(footer));
+            final Map<String, String> metadata = selected(attributesOf(footer),
+                    subset(context.getProperty(ATTRIBUTE_SUBSET).getValue()));
+
+            if (TO_CONTENT.getValue().equals(context.getProperty(DESTINATION).getValue())) {
+                // Deliberately after the footer has been read: this replaces the Parquet file.
+                flowFile = session.write(flowFile, out -> writeJson(metadata, out));
+            } else {
+                flowFile = session.putAllAttributes(flowFile, metadata);
+            }
             session.transfer(flowFile, REL_SUCCESS);
         } catch (final Exception e) {
             getLogger().error("Failed to read Parquet metadata from {}", new Object[] {flowFile}, e);
@@ -160,7 +220,8 @@ public class DetectParquetAttributes extends AbstractProcessor {
             recordCount += block.getRowCount();
         }
 
-        final Map<String, String> attributes = new HashMap<>();
+        // Sorted, so the JSON destination writes the same bytes for the same footer every time.
+        final Map<String, String> attributes = new TreeMap<>();
         attributes.put(RECORD_COUNT_ATTRIBUTE, Long.toString(recordCount));
         attributes.put(ROW_GROUP_COUNT_ATTRIBUTE, Integer.toString(footer.getBlocks().size()));
         attributes.put(SCHEMA_ATTRIBUTE, fileMetaData.getSchema().toString());
@@ -176,6 +237,46 @@ public class DetectParquetAttributes extends AbstractProcessor {
             }
         }
         return attributes;
+    }
+
+    /** The names from the Attribute Subset property, or empty when it is not set. */
+    private static Set<String> subset(final String property) {
+        if (property == null) {
+            return Collections.emptySet();
+        }
+        return Arrays.stream(property.split(","))
+                .map(String::trim)
+                .filter(name -> !name.isEmpty())
+                .collect(Collectors.toSet());
+    }
+
+    /** Everything found, or just the named part of it. An empty subset means no filtering. */
+    private static Map<String, String> selected(final Map<String, String> metadata,
+            final Set<String> subset) {
+        if (subset.isEmpty()) {
+            return metadata;
+        }
+        return metadata.entrySet().stream()
+                .filter(entry -> subset.contains(entry.getKey()))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue,
+                        (first, second) -> first, TreeMap::new));
+    }
+
+    /**
+     * Writes the metadata as a flat JSON object of strings.
+     *
+     * <p>A loop rather than a stream: the generator throws IOException on every call, and a lambda
+     * cannot let that out.
+     */
+    private static void writeJson(final Map<String, String> metadata, final OutputStream out)
+            throws IOException {
+        try (JsonGenerator json = JSON.createGenerator(out)) {
+            json.writeStartObject();
+            for (final Map.Entry<String, String> entry : metadata.entrySet()) {
+                json.writeStringField(entry.getKey(), entry.getValue());
+            }
+            json.writeEndObject();
+        }
     }
 
     /** Some parquet failures carry no message, in which case the type name is all we have. */

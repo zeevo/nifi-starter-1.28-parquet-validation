@@ -59,9 +59,17 @@ public class DetectParquetAttributesTest {
     }
 
     @Test
-    public void testHasNoProperties() {
-        assertTrue(runner.getProcessor().getPropertyDescriptors().isEmpty());
+    public void testDefaultsToAttributesAndNoSubset() {
+        assertEquals(Arrays.asList(DetectParquetAttributes.DESTINATION,
+                DetectParquetAttributes.ATTRIBUTE_SUBSET),
+                runner.getProcessor().getPropertyDescriptors());
         runner.assertValid();
+    }
+
+    @Test
+    public void testUnknownDestinationIsRejected() {
+        runner.setProperty(DetectParquetAttributes.DESTINATION, "somewhere-else");
+        runner.assertNotValid();
     }
 
     @Test
@@ -141,6 +149,75 @@ public class DetectParquetAttributesTest {
         runner.assertAllFlowFilesTransferred(DetectParquetAttributes.REL_FAILURE, 1);
         assertNotNull(runner.getFlowFilesForRelationship(DetectParquetAttributes.REL_FAILURE).get(0)
                 .getAttribute(DetectParquetAttributes.ERROR_ATTRIBUTE));
+    }
+
+    @Test
+    public void testSubsetKeepsOnlyTheNamedAttributes() throws IOException {
+        runner.setProperty(DetectParquetAttributes.ATTRIBUTE_SUBSET,
+                // Spaced out on purpose, and naming one the file has nothing for.
+                "parquet.created.by, parquet.record.count ,parquet.metadata.nothing.writes.this");
+        final MockFlowFile out = runFixture("valid.parquet", DetectParquetAttributes.REL_SUCCESS);
+
+        assertEquals(CREATED_BY, out.getAttribute(DetectParquetAttributes.CREATED_BY_ATTRIBUTE));
+        assertEquals("2", out.getAttribute(DetectParquetAttributes.RECORD_COUNT_ATTRIBUTE));
+
+        assertNull(out.getAttribute(DetectParquetAttributes.ROW_GROUP_COUNT_ATTRIBUTE));
+        assertNull(out.getAttribute(DetectParquetAttributes.SCHEMA_ATTRIBUTE));
+        assertNull(out.getAttribute("parquet.metadata.nothing.writes.this"));
+        assertEquals(keys(), metadataKeys(out));
+    }
+
+    @Test
+    public void testDestinationContentWritesJson() throws IOException {
+        runner.setProperty(DetectParquetAttributes.DESTINATION, DetectParquetAttributes.TO_CONTENT);
+        runner.setProperty(DetectParquetAttributes.ATTRIBUTE_SUBSET,
+                "parquet.record.count,parquet.row.group.count");
+
+        runner.enqueue(fixtureBytes("valid.parquet"));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(DetectParquetAttributes.REL_SUCCESS, 1);
+        final MockFlowFile out =
+                runner.getFlowFilesForRelationship(DetectParquetAttributes.REL_SUCCESS).get(0);
+
+        out.assertContentEquals("{\"parquet.record.count\":\"2\",\"parquet.row.group.count\":\"1\"}");
+        // The metadata went to the content instead, so none of it is on the FlowFile as well.
+        assertNull(out.getAttribute(DetectParquetAttributes.RECORD_COUNT_ATTRIBUTE));
+    }
+
+    /**
+     * The Avro schema value is itself JSON, so its quotes have to survive being nested in JSON.
+     * This is the case a hand-rolled writer would get wrong.
+     */
+    @Test
+    public void testContentEscapesValuesThatAreThemselvesJson() throws IOException {
+        runner.setProperty(DetectParquetAttributes.DESTINATION, DetectParquetAttributes.TO_CONTENT);
+
+        runner.enqueue(fixtureBytes("valid.parquet"));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(DetectParquetAttributes.REL_SUCCESS, 1);
+        final String content = new String(runner
+                .getFlowFilesForRelationship(DetectParquetAttributes.REL_SUCCESS).get(0).toByteArray(),
+                StandardCharsets.UTF_8);
+
+        assertTrue(content.startsWith("{\"parquet.created.by\":"), content);
+        assertTrue(content.contains("\\\"type\\\":\\\"record\\\""), content);
+    }
+
+    /** Unreadable content must be left alone, not replaced by a report about why it failed. */
+    @Test
+    public void testDestinationContentLeavesFailedContentUntouched() {
+        runner.setProperty(DetectParquetAttributes.DESTINATION, DetectParquetAttributes.TO_CONTENT);
+
+        runner.enqueue("hello".getBytes(StandardCharsets.UTF_8));
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(DetectParquetAttributes.REL_FAILURE, 1);
+        final MockFlowFile out =
+                runner.getFlowFilesForRelationship(DetectParquetAttributes.REL_FAILURE).get(0);
+        out.assertContentEquals("hello");
+        assertNotNull(out.getAttribute(DetectParquetAttributes.ERROR_ATTRIBUTE));
     }
 
     private static Set<String> keys(final String... keys) {
