@@ -16,11 +16,11 @@
  */
 package org.example.nifi.processors;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.apache.avro.generic.GenericRecord;
 
@@ -99,11 +99,9 @@ final class Item {
         }
         if (value instanceof Collection) {
             // GenericData.Array for an array column, whichever list encoding the file used.
-            final List<Key> keys = new ArrayList<>();
-            for (final Object element : (Collection<?>) value) {
-                keys.add(Key.of(element));
-            }
-            return Collections.unmodifiableList(keys);
+            return ((Collection<?>) value).stream()
+                    .map(Key::of)
+                    .collect(Collectors.toUnmodifiableList());
         }
         return Collections.singletonList(Key.of(value));
     }

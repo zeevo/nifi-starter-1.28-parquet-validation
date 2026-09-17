@@ -24,7 +24,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
@@ -249,25 +251,29 @@ public class ValidateParquet extends AbstractProcessor {
      * @return the first rule a value breaks, or null if they all pass
      */
     private static String validateKeys(final List<Key> keys) {
-        for (int i = 0; i < keys.size(); i++) {
-            final Key key = keys.get(i);
-            final String field = keys.size() > 1 ? Item.KEY + "[" + i + "]" : Item.KEY;
+        // findFirst short-circuits, so values past the first bad one are never looked at.
+        return IntStream.range(0, keys.size())
+                .mapToObj(i -> validateKey(keys.get(i),
+                        keys.size() > 1 ? Item.KEY + "[" + i + "]" : Item.KEY))
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+    }
 
-            if (key.isText()) {
-                if (key.text().trim().isEmpty()) {
-                    return field + " is blank";
-                }
-            } else if (key.isBinary()) {
-                if (key.bytes().length != KEY_BYTE_LENGTH) {
-                    return field + " is " + key.bytes().length + " bytes, not " + KEY_BYTE_LENGTH;
-                }
-            } else {
-                // A numeric column, or a null sitting inside an array. Saying so beats reporting it
-                // as a missing value, which is the same reason a non-numeric id is called out.
-                return field + " is neither text nor binary";
-            }
+    /**
+     * @return the rule this one value breaks, reported against {@code field}, or null if it passes
+     */
+    private static String validateKey(final Key key, final String field) {
+        if (key.isText()) {
+            return key.text().trim().isEmpty() ? field + " is blank" : null;
         }
-        return null;
+        if (key.isBinary()) {
+            return key.bytes().length == KEY_BYTE_LENGTH ? null
+                    : field + " is " + key.bytes().length + " bytes, not " + KEY_BYTE_LENGTH;
+        }
+        // A numeric column, or a null sitting inside an array. Saying so beats reporting it as a
+        // missing value, which is the same reason a non-numeric id is called out.
+        return field + " is neither text nor binary";
     }
 
     /** Some parquet failures carry no message, in which case the type name is all we have. */
