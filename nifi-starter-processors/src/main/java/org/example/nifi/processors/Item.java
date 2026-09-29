@@ -21,6 +21,8 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.avro.generic.GenericRecord;
+import org.apache.parquet.example.data.Group;
+import org.apache.parquet.schema.Type;
 
 /**
  * One item out of a Parquet file: the id, name and status that ValidateParquet's rules work on.
@@ -68,6 +70,39 @@ final class Item {
                 rawId != null && !(rawId instanceof Number));
     }
 
+    /**
+     * Reads one item out of a parquet-java example Group, giving the same result
+     * {@link #from(GenericRecord)} would for the same row. Needs the same schema check first.
+     */
+    static Item from(final Group group) {
+        final Type idType = group.getType().getType(ID);
+        Long id = null;
+        boolean idNonNumeric = false;
+        if (group.getFieldRepetitionCount(ID) > 0) {
+            if (!idType.isPrimitive()) {
+                idNonNumeric = true;
+            } else {
+                switch (idType.asPrimitiveType().getPrimitiveTypeName()) {
+                    case INT32:
+                        id = (long) group.getInteger(ID, 0);
+                        break;
+                    case INT64:
+                        id = group.getLong(ID, 0);
+                        break;
+                    case FLOAT:
+                        id = (long) group.getFloat(ID, 0);
+                        break;
+                    case DOUBLE:
+                        id = (long) group.getDouble(ID, 0);
+                        break;
+                    default:
+                        idNonNumeric = true;
+                }
+            }
+        }
+        return new Item(id, text(group, NAME), text(group, STATUS), idNonNumeric);
+    }
+
     /** Null when the column was null, and also when it held something that is not a number. */
     Long id() {
         return id;
@@ -93,6 +128,12 @@ final class Item {
     private static String text(final GenericRecord record, final String field) {
         final Object value = record.get(field);
         return value == null ? null : value.toString();
+    }
+
+    private static String text(final Group group, final String field) {
+        return group.getFieldRepetitionCount(field) == 0
+                ? null
+                : group.getValueToString(group.getType().getFieldIndex(field), 0);
     }
 
     @Override

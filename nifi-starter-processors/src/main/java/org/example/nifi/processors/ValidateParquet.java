@@ -208,7 +208,7 @@ public class ValidateParquet extends AbstractProcessor {
      *
      * @return the first rule the item breaks, or null if it passes
      */
-    private static String validateItem(final Item item) {
+    static String validateItem(final Item item) {
         if (item.idNonNumeric()) {
             // A string or binary id column would otherwise look like a null id. Calling it out
             // separately keeps a schema problem from being reported as a missing value.
