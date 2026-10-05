@@ -58,6 +58,8 @@ import org.junit.jupiter.api.io.TempDir;
  */
 public class FilterParquetTest {
 
+    private static final String AVRO_SCHEMA_KEY = "parquet.avro.schema";
+
     private static final PlainParquetConfiguration CONF = new PlainParquetConfiguration();
 
     @TempDir
@@ -120,10 +122,7 @@ public class FilterParquetTest {
         assertCounts(filter("multi-row-group.parquet"), 2000, 2000, 0);
     }
 
-    /**
-     * FilterParquet reads rows as Groups where ValidateParquet reads Avro records, so this checks
-     * the two agree row for row on every fixture, including a string typed id column.
-     */
+    /** Checks the two processors agree row for row on every fixture, including a string typed id. */
     @Test
     public void testRemovesExactlyWhatValidateParquetRejects() throws IOException {
         for (final String fixture : new String[] {
@@ -162,9 +161,15 @@ public class FilterParquetTest {
         assertEquals("90d", after.get("retention.policy"));
     }
 
-    /** No Avro schema key is invented for a file that never had one. */
+    /** The Avro writer always writes parquet.avro.schema, so a file without one gains it. */
     @Test
     public void testSchemaAndKeyValuesAreKeptForAForeignWrittenFile() throws IOException {
+        assertFalse(footer(fixtureBytes("foreign-writer.parquet")).getKeyValueMetaData()
+                .containsKey(AVRO_SCHEMA_KEY));
+        assertTrue(footer(filter("foreign-writer.parquet").toByteArray()).getKeyValueMetaData()
+                .containsKey(AVRO_SCHEMA_KEY));
+
+        runner.clearTransferState();
         assertSchemaAndKeyValuesKept("foreign-writer.parquet", 16);
     }
 
@@ -173,7 +178,7 @@ public class FilterParquetTest {
     public void testWriterModelNameIsTheWritersOwn() throws IOException {
         assertEquals("avro", footer(fixtureBytes("metadata-rich.parquet"))
                 .getKeyValueMetaData().get(ParquetWriter.OBJECT_MODEL_NAME_PROP));
-        assertEquals("example", footer(filter("metadata-rich.parquet").toByteArray())
+        assertEquals("avro", footer(filter("metadata-rich.parquet").toByteArray())
                 .getKeyValueMetaData().get(ParquetWriter.OBJECT_MODEL_NAME_PROP));
     }
 
@@ -220,6 +225,9 @@ public class FilterParquetTest {
         final Map<String, String> actual = new HashMap<>(after.getKeyValueMetaData());
         expected.remove(ParquetWriter.OBJECT_MODEL_NAME_PROP);
         actual.remove(ParquetWriter.OBJECT_MODEL_NAME_PROP);
+        if (!expected.containsKey(AVRO_SCHEMA_KEY)) {
+            actual.remove(AVRO_SCHEMA_KEY);
+        }
         assertFalse(expected.isEmpty());
         assertEquals(expected, actual);
         return actual;

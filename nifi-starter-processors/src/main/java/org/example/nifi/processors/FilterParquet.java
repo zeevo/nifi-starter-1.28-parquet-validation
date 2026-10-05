@@ -25,6 +25,9 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -40,15 +43,14 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.parquet.ParquetReadOptions;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.avro.AvroParquetWriter;
+import org.apache.parquet.avro.AvroSchemaConverter;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
-import org.apache.parquet.example.data.Group;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.ParquetWriter;
-import org.apache.parquet.hadoop.api.ReadSupport;
-import org.apache.parquet.hadoop.example.ExampleParquetWriter;
-import org.apache.parquet.hadoop.example.GroupReadSupport;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.OutputFile;
@@ -56,10 +58,11 @@ import org.apache.parquet.io.PositionOutputStream;
 
 @Tags({"parquet", "filter", "validate"})
 @CapabilityDescription("Writes a copy of an incoming Parquet file with the rows that fail "
-        + "ValidateParquet's rules left out. The copy has exactly the same Parquet schema and "
-        + "carries every file-level key/value metadata entry of the input, except "
-        + "writer.model.name, which parquet-java always sets itself. Compression and row group "
-        + "sizing are the writer's defaults rather than the input's. Every column is carried "
+        + "ValidateParquet's rules left out. The copy is written with the input's own Avro "
+        + "schema, and carries every file-level key/value metadata entry of the input, except "
+        + "writer.model.name, which parquet-java always sets itself. A file written without Avro "
+        + "also gains parquet.avro.schema, which the Avro writer always adds. Compression and "
+        + "row group sizing are the writer's defaults rather than the input's. Every column is carried "
         + "through: only rows are removed. Content is streamed in both directions, so memory use "
         + "does not grow with the size of the file.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
@@ -96,6 +99,9 @@ public class FilterParquet extends AbstractProcessor {
                     + "Parquet, or whose schema is missing a field the rules need")
             .build();
 
+    /** Where AvroWriteSupport keeps the Avro schema. parquet-avro has the constant, but private. */
+    private static final String AVRO_SCHEMA_KEY = "parquet.avro.schema";
+
     private static final Set<Relationship> RELATIONSHIPS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_ORIGINAL, REL_FAILURE)));
 
@@ -125,29 +131,31 @@ public class FilterParquet extends AbstractProcessor {
                 }
             }
 
-            // parquet-java refuses writer.model.name as extra metadata and writes its own, so it is
-            // the one key that cannot be carried over. Everything else passes through verbatim.
+            final Schema schema = avroSchema(footer);
+
+            // parquet-java refuses writer.model.name as extra metadata and writes its own, and
+            // AvroWriteSupport writes parquet.avro.schema from the schema above. Everything else
+            // passes through verbatim.
             final Map<String, String> keyValues = new HashMap<>(footer.getKeyValueMetaData());
             keyValues.remove(ParquetWriter.OBJECT_MODEL_NAME_PROP);
+            keyValues.remove(AVRO_SCHEMA_KEY);
 
             final long[] counts = new long[2];
             filtered = session.create(original);
             filtered = session.write(filtered, out -> {
-                // Groups rather than Avro records on both sides, so the copy is written with the
-                // input's own MessageType instead of one converted there and back through Avro.
-                try (ParquetReader<Group> reader = new ParquetReader.Builder<Group>(inputFile, parquetConfiguration) {
-                            @Override
-                            protected ReadSupport<Group> getReadSupport() {
-                                return new GroupReadSupport();
-                            }
-                        }.build();
-                     ParquetWriter<Group> writer = ExampleParquetWriter.builder(outputFile(out))
+                try (ParquetReader<GenericRecord> reader = AvroParquetReader
+                             .<GenericRecord>builder(inputFile, parquetConfiguration)
+                             .withDataModel(GenericData.get())
+                             .build();
+                     ParquetWriter<GenericRecord> writer = AvroParquetWriter
+                             .<GenericRecord>builder(outputFile(out))
                              .withConf(parquetConfiguration)
-                             .withType(footer.getSchema())
+                             .withDataModel(GenericData.get())
+                             .withSchema(schema)
                              .withExtraMetaData(keyValues)
                              .build()) {
 
-                    Group row;
+                    GenericRecord row;
                     while ((row = reader.read()) != null) {
                         counts[0]++;
                         if (ValidateParquet.validateItem(Item.from(row)) == null) {
@@ -184,6 +192,17 @@ public class FilterParquet extends AbstractProcessor {
         try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
             return reader.getFileMetaData();
         }
+    }
+
+    /**
+     * The Avro schema the reader hands records back in, so the writer takes them as they are: the
+     * one the input was written with when it carries one, otherwise its Parquet schema converted.
+     */
+    private Schema avroSchema(final FileMetaData footer) {
+        final String json = footer.getKeyValueMetaData().get(AVRO_SCHEMA_KEY);
+        return json != null
+                ? new Schema.Parser().parse(json)
+                : new AvroSchemaConverter(parquetConfiguration).convert(footer.getSchema());
     }
 
     /**
