@@ -51,6 +51,7 @@ import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.ParquetWriter;
+import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.OutputFile;
@@ -61,9 +62,9 @@ import org.apache.parquet.io.PositionOutputStream;
         + "ValidateParquet's rules left out. The copy is written with the input's own Avro "
         + "schema, and carries every file-level key/value metadata entry of the input, except "
         + "writer.model.name, which parquet-java always sets itself. A file written without Avro "
-        + "also gains parquet.avro.schema, which the Avro writer always adds. Compression and "
-        + "row group sizing are the writer's defaults rather than the input's. Every column is carried "
-        + "through: only rows are removed. Content is streamed in both directions, so memory use "
+        + "also gains parquet.avro.schema, which the Avro writer always adds. The copy is "
+        + "SNAPPY compressed and uses the writer's default row group size, whatever the input "
+        + "used. Every column is carried through: only rows are removed. Content is streamed in both directions, so memory use "
         + "does not grow with the size of the file.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
@@ -152,6 +153,7 @@ public class FilterParquet extends AbstractProcessor {
                              .withConf(parquetConfiguration)
                              .withDataModel(GenericData.get())
                              .withSchema(schema)
+                             .withCompressionCodec(CompressionCodecName.SNAPPY)
                              .withExtraMetaData(keyValues)
                              .build()) {
 

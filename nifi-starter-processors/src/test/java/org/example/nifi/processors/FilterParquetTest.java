@@ -42,6 +42,9 @@ import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.ParquetWriter;
+import org.apache.parquet.hadoop.metadata.BlockMetaData;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
 import org.apache.parquet.io.LocalInputFile;
 import org.junit.jupiter.api.BeforeEach;
@@ -180,6 +183,20 @@ public class FilterParquetTest {
                 .getKeyValueMetaData().get(ParquetWriter.OBJECT_MODEL_NAME_PROP));
         assertEquals("avro", footer(filter("metadata-rich.parquet").toByteArray())
                 .getKeyValueMetaData().get(ParquetWriter.OBJECT_MODEL_NAME_PROP));
+    }
+
+    @Test
+    public void testCopyIsSnappyCompressed() throws IOException {
+        final byte[] out = filter("multi-row-group.parquet").toByteArray();
+        try (ParquetFileReader reader = ParquetFileReader.open(
+                new LocalInputFile(write(out)), ParquetReadOptions.builder(CONF).build())) {
+            assertFalse(reader.getRowGroups().isEmpty());
+            for (final BlockMetaData rowGroup : reader.getRowGroups()) {
+                for (final ColumnChunkMetaData column : rowGroup.getColumns()) {
+                    assertEquals(CompressionCodecName.SNAPPY, column.getCodec());
+                }
+            }
+        }
     }
 
     @Test
