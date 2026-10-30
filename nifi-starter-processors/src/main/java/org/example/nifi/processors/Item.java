@@ -16,6 +16,8 @@
  */
 package org.example.nifi.processors;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -103,10 +105,14 @@ final class Item {
 
     /**
      * Avro hands back Utf8 rather than String unless the writer set avro.java.string, which files
-     * from Spark, pyarrow and DuckDB do not, so casting to String would fail on most real files.
+     * from Spark, pyarrow and DuckDB do not, so casting to String would fail on most real files. A
+     * column with no string annotation arrives as a ByteBuffer, whose toString describes the buffer.
      */
     private static String text(final GenericRecord record, final String field) {
         final Object value = record.get(field);
+        if (value instanceof ByteBuffer) {
+            return StandardCharsets.UTF_8.decode(((ByteBuffer) value).duplicate()).toString();
+        }
         return value == null ? null : value.toString();
     }
 
