@@ -79,6 +79,10 @@ import org.junit.jupiter.api.io.TempDir;
  *   spark-array-id.parquet          id is a 3-level list
  *   spark-struct-id.parquet         id is a struct
  *   spark-invalid.parquet           one passing row, then one row breaking each rule
+ *   spark-double-id.parquet         id is a double, no other columns added
+ *   spark-boolean-id.parquet        id is a boolean, no other columns added
+ *   spark-int-name.parquet          name is INT32, no other columns added
+ *   spark-struct-status.parquet     status is a struct, no other columns added
  */
 public class ValidateParquetTest {
 
@@ -244,6 +248,31 @@ public class ValidateParquetTest {
     @Test
     public void testSparkStructIdIsInvalid() throws IOException {
         assertEveryRowHasNonNumericId("spark-struct-id.parquet");
+    }
+
+    @Test
+    public void testSparkDoubleIdIsValid() throws IOException {
+        assertValidSparkFile("spark-double-id.parquet");
+    }
+
+    @Test
+    public void testSparkBooleanIdIsInvalid() throws IOException {
+        assertEveryRowHasNonNumericId("spark-boolean-id.parquet");
+    }
+
+    /** A numeric name still counts as present, and as not blank. */
+    @Test
+    public void testSparkInt32NameIsValid() throws IOException {
+        assertValidSparkFile("spark-int-name.parquet");
+    }
+
+    @Test
+    public void testSparkStructStatusIsNotAllowed() throws IOException {
+        final MockFlowFile out = runFixture("spark-struct-status.parquet", ValidateParquet.REL_INVALID);
+
+        assertEquals("3", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+        assertTrue(out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE)
+                .startsWith("row 1: status '<group>' is not an allowed value"));
     }
 
     @Test
