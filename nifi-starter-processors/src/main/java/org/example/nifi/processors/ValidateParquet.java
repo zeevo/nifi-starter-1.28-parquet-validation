@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
@@ -42,11 +41,11 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.parquet.ParquetReadOptions;
-import org.apache.parquet.avro.AvroParquetReader;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
+import org.apache.parquet.hadoop.api.ReadSupport;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
 
@@ -57,7 +56,8 @@ import org.apache.parquet.schema.MessageType;
         + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. The "
         + "rules are compiled in and are not configurable, so this processor has no properties. "
         + "Content is never modified, and is read straight from the content repository rather "
-        + "than buffered, so memory use does not grow with the size of the file.")
+        + "than buffered, so memory use does not grow with the size of the file. Only the id, name "
+        + "and status columns are read, so the cost of a file does not grow with its other columns.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -171,12 +171,7 @@ public class ValidateParquet extends AbstractProcessor {
         long invalidCount = 0;
         final List<String> violations = new ArrayList<>();
 
-        try (ParquetReader<GenericRecord> reader = AvroParquetReader
-                .<GenericRecord>builder(inputFile, parquetConfiguration)
-                // Short-circuits AvroReadSupport, which would otherwise build another Hadoop
-                // Configuration just to resolve the data model.
-                .withDataModel(GenericData.get())
-                .build()) {
+        try (ParquetReader<GenericRecord> reader = new ItemReaderBuilder(inputFile, parquetConfiguration).build()) {
 
             GenericRecord record;
             while ((record = reader.read()) != null) {
@@ -235,6 +230,19 @@ public class ValidateParquet extends AbstractProcessor {
     /** Some parquet failures carry no message, in which case the type name is all we have. */
     private static String describe(final Exception e) {
         return e.getMessage() == null ? e.toString() : e.getMessage();
+    }
+
+    /** The builder's constructor is protected, and getReadSupport is how a subclass plugs in. */
+    private static final class ItemReaderBuilder extends ParquetReader.Builder<GenericRecord> {
+
+        ItemReaderBuilder(final InputFile file, final ParquetConfiguration configuration) {
+            super(file, configuration);
+        }
+
+        @Override
+        protected ReadSupport<GenericRecord> getReadSupport() {
+            return new ItemReadSupport();
+        }
     }
 
     private static final class ValidationResult {

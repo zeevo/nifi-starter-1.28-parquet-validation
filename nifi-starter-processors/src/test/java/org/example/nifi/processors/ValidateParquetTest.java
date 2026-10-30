@@ -25,13 +25,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
 
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
+import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.metadata.BlockMetaData;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.io.LocalInputFile;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /*
  * Fixtures live in src/test/resources/parquet. Every one uses an all-nullable Avro schema with no
@@ -51,6 +59,28 @@ import org.junit.jupiter.api.Test;
  *   invalid-many.parquet           20 rows, 1 to 5 pass, 6 to 20 have id 0
  *   missing-status-column.parquet  schema is id and name only
  *   multi-row-group.parquet        2000 valid rows spread over 161 row groups
+ *
+ * The spark-* fixtures were written by PySpark 3.5.3 with its defaults, coalesced to one file. They
+ * declare no Avro schema, and alongside id, name and status they carry the columns that real Spark
+ * tables have and Avro chokes on: an INT96 timestamp, a column called "unit price", decimals, a
+ * 3-level list, a map and a struct. Unless noted the rows are (1,"bob","ACTIVE"),
+ * (2,"carol","PENDING"), (3,null,"INACTIVE"), and Spark marks nullable columns optional and
+ * non-nullable ones required.
+ *
+ *   spark-wide.parquet              snappy, the default
+ *   spark-zstd.parquet              zstd
+ *   spark-gzip.parquet              gzip
+ *   spark-legacy.parquet            spark.sql.parquet.writeLegacyFormat=true: 2-level list, decimal
+ *                                   as fixed_len_byte_array
+ *   spark-required-columns.parquet  id, name and status are all required
+ *   spark-int-id.parquet            id is INT32
+ *   spark-decimal-id.parquet        id is decimal(18,0), stored as INT64
+ *   spark-string-id.parquet         id is a string
+ *   spark-array-id.parquet          id is a 3-level list
+ *   spark-struct-id.parquet         id is a struct
+ *   spark-invalid.parquet           one passing row, then one row breaking each rule
+ *   spark-binary-text.parquet       name and status are unannotated BINARY, no other columns added:
+ *                                   (1,"   ","ACTIVE"), (2,"carol","BOGUS")
  */
 public class ValidateParquetTest {
 
@@ -167,6 +197,95 @@ public class ValidateParquetTest {
     }
 
     @Test
+    public void testSparkFileWithColumnsAvroCannotRepresentIsValid() throws IOException {
+        assertValidSparkFile("spark-wide.parquet");
+    }
+
+    @Test
+    public void testSparkZstdFileIsValid() throws IOException {
+        assertValidSparkFile("spark-zstd.parquet");
+    }
+
+    @Test
+    public void testSparkGzipFileIsValid() throws IOException {
+        assertValidSparkFile("spark-gzip.parquet");
+    }
+
+    @Test
+    public void testSparkLegacyFormatIsValid() throws IOException {
+        assertValidSparkFile("spark-legacy.parquet");
+    }
+
+    /** A projection that assumed nullable columns would not match this file. */
+    @Test
+    public void testSparkRequiredColumnsAreValid() throws IOException {
+        assertValidSparkFile("spark-required-columns.parquet");
+    }
+
+    @Test
+    public void testSparkInt32IdIsValid() throws IOException {
+        assertValidSparkFile("spark-int-id.parquet");
+    }
+
+    @Test
+    public void testSparkDecimalIdIsValid() throws IOException {
+        assertValidSparkFile("spark-decimal-id.parquet");
+    }
+
+    @Test
+    public void testSparkStringIdIsInvalid() throws IOException {
+        assertEveryRowHasNonNumericId("spark-string-id.parquet");
+    }
+
+    /** A list has to survive projection with its 3-level structure intact, or the read fails. */
+    @Test
+    public void testSparkArrayIdIsInvalid() throws IOException {
+        assertEveryRowHasNonNumericId("spark-array-id.parquet");
+    }
+
+    @Test
+    public void testSparkStructIdIsInvalid() throws IOException {
+        assertEveryRowHasNonNumericId("spark-struct-id.parquet");
+    }
+
+    @Test
+    public void testSparkFileReportsEveryRule() throws IOException {
+        final MockFlowFile out = runFixture("spark-invalid.parquet", ValidateParquet.REL_INVALID);
+
+        assertEquals("6", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("5", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+        assertEquals("row 2: id must be positive; row 3: name is blank; "
+                        + "row 4: status 'BOGUS' is not an allowed value; row 5: id is null; "
+                        + "row 6: name and status are both null",
+                out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+    }
+
+    /** Some writers store strings with no annotation, as spark.sql.parquet.binaryAsString allows for. */
+    @Test
+    public void testSparkUnannotatedBinaryIsReadAsText() throws IOException {
+        final MockFlowFile out = runFixture("spark-binary-text.parquet", ValidateParquet.REL_INVALID);
+
+        assertEquals("row 1: name is blank; row 2: status 'BOGUS' is not an allowed value",
+                out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+    }
+
+    /**
+     * Overwrites every column chunk outside Item.FIELDS with garbage. The file can only still pass
+     * if those chunks are never decoded, which is the whole point of projecting.
+     */
+    @Test
+    public void testUnrelatedColumnsAreNotRead(@TempDir final Path dir) throws IOException {
+        final byte[] content = withUnrelatedColumnsCorrupted(fixtureBytes("spark-wide.parquet"), dir);
+
+        runner.enqueue(content);
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(ValidateParquet.REL_VALID, 1);
+        assertEquals("3", runner.getFlowFilesForRelationship(ValidateParquet.REL_VALID).get(0)
+                .getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+    }
+
+    @Test
     public void testNonParquetContentIsInvalidNotFailure() {
         runner.enqueue("hello".getBytes(StandardCharsets.UTF_8));
         runner.run();
@@ -194,6 +313,37 @@ public class ValidateParquetTest {
 
         assertEquals("1", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
         assertEquals(expected, out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+    }
+
+    private void assertValidSparkFile(final String fixture) throws IOException {
+        final MockFlowFile out = runFixture(fixture, ValidateParquet.REL_VALID);
+
+        assertEquals("3", out.getAttribute(ValidateParquet.RECORD_COUNT_ATTRIBUTE));
+        assertEquals("0", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+    }
+
+    private void assertEveryRowHasNonNumericId(final String fixture) throws IOException {
+        final MockFlowFile out = runFixture(fixture, ValidateParquet.REL_INVALID);
+
+        assertEquals("3", out.getAttribute(ValidateParquet.INVALID_COUNT_ATTRIBUTE));
+        assertEquals("row 1: id is not numeric; row 2: id is not numeric; row 3: id is not numeric",
+                out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+    }
+
+    private static byte[] withUnrelatedColumnsCorrupted(final byte[] content, final Path dir) throws IOException {
+        final Path file = Files.write(dir.resolve("input.parquet"), content);
+        final byte[] corrupted = content.clone();
+        try (ParquetFileReader reader = ParquetFileReader.open(new LocalInputFile(file))) {
+            for (final BlockMetaData block : reader.getFooter().getBlocks()) {
+                for (final ColumnChunkMetaData chunk : block.getColumns()) {
+                    if (!Item.FIELDS.contains(chunk.getPath().toArray()[0])) {
+                        final int start = Math.toIntExact(chunk.getStartingPos());
+                        Arrays.fill(corrupted, start, start + Math.toIntExact(chunk.getTotalSize()), (byte) 0xFF);
+                    }
+                }
+            }
+        }
+        return corrupted;
     }
 
     /**
