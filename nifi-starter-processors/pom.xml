@@ -50,7 +50,7 @@
         <!-- Parquet, and the Hadoop it needs at runtime. See the root pom for why. -->
         <dependency>
             <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-avro</artifactId>
+            <artifactId>parquet-hadoop</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.hadoop</groupId>
