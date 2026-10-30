@@ -16,11 +16,14 @@
  */
 package org.example.nifi.processors;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import org.apache.avro.generic.GenericRecord;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Type;
 
 /**
  * One item out of a Parquet file: the id, name and status that ValidateParquet's rules work on.
@@ -52,6 +55,18 @@ final class Item {
         this.name = name;
         this.status = status;
         this.idNonNumeric = idNonNumeric;
+    }
+
+    /**
+     * The file's schema cut down to {@link #FIELDS}. Only safe once the schema is known to declare
+     * every one of them, because MessageType.getType throws for a field it does not have.
+     */
+    static MessageType projection(final MessageType fileSchema) {
+        final List<Type> fields = new ArrayList<>();
+        for (final String field : FIELDS) {
+            fields.add(fileSchema.getType(field));
+        }
+        return new MessageType(fileSchema.getName(), fields);
     }
 
     /**
