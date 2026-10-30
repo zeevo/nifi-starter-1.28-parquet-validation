@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
@@ -42,22 +40,22 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.parquet.ParquetReadOptions;
-import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
 
-@Tags({"parquet", "validate", "avro", "record"})
+@Tags({"parquet", "validate", "record"})
 @CapabilityDescription("Validates a Parquet file carried as FlowFile content. The schema must "
         + "contain the fields id, name and status, and every record must satisfy a fixed set of "
         + "rules: id present, numeric and positive; at least one of name and status present; name "
         + "not blank when present; status one of ACTIVE, INACTIVE or PENDING when present. The "
         + "rules are compiled in and are not configurable, so this processor has no properties. "
         + "Content is never modified, and is read straight from the content repository rather "
-        + "than buffered, so memory use does not grow with the size of the file.")
+        + "than buffered, so memory use does not grow with the size of the file. Only the id, name "
+        + "and status columns are read, so the cost of a file does not grow with its other columns.")
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @SideEffectFree
 @SupportsBatching
@@ -150,56 +148,50 @@ public class ValidateParquet extends AbstractProcessor {
     }
 
     private ValidationResult validate(final InputFile inputFile) throws IOException {
-        final MessageType schema = readSchema(inputFile);
+        final ParquetReadOptions options = ParquetReadOptions.builder(parquetConfiguration).build();
+        try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
+            final MessageType schema = reader.getFileMetaData().getSchema();
 
-        final List<String> missing = new ArrayList<>();
-        for (final String field : Item.FIELDS) {
-            // containsField is case sensitive and matches top-level fields only, which is what we
-            // want. It also has to come before any getType call, which throws on unknown names.
-            if (!schema.containsField(field)) {
-                missing.add(field);
+            final List<String> missing = new ArrayList<>();
+            for (final String field : Item.FIELDS) {
+                // containsField is case sensitive and matches top-level fields only, which is what
+                // we want. It also has to come before any getType call, which throws on unknown
+                // names.
+                if (!schema.containsField(field)) {
+                    missing.add(field);
+                }
             }
-        }
-        if (!missing.isEmpty()) {
-            // This gate is load-bearing, not just an optimization: GenericData.Record.get throws
-            // AvroRuntimeException for a field the schema does not declare, so the rules below
-            // must never run against a schema that is missing one.
-            return ValidationResult.missingFields(missing);
-        }
+            if (!missing.isEmpty()) {
+                // This gate is load-bearing, not just an optimization: Item.projection throws for a
+                // field the schema does not declare, so reading must never start without all of them.
+                return ValidationResult.missingFields(missing);
+            }
 
-        long recordCount = 0;
-        long invalidCount = 0;
-        final List<String> violations = new ArrayList<>();
+            final MessageType projection = Item.projection(schema);
+            reader.setRequestedSchema(projection);
+            final String createdBy = reader.getFileMetaData().getCreatedBy();
 
-        try (ParquetReader<GenericRecord> reader = AvroParquetReader
-                .<GenericRecord>builder(inputFile, parquetConfiguration)
-                // Short-circuits AvroReadSupport, which would otherwise build another Hadoop
-                // Configuration just to resolve the data model.
-                .withDataModel(GenericData.get())
-                .build()) {
+            long recordCount = 0;
+            long invalidCount = 0;
+            final List<String> violations = new ArrayList<>();
 
-            GenericRecord record;
-            while ((record = reader.read()) != null) {
-                recordCount++;
-                final String violation = validateItem(Item.from(record));
-                if (violation != null) {
-                    invalidCount++;
-                    // Keep counting past the cap so invalid.count stays accurate.
-                    if (violations.size() < MAX_REPORTED_VIOLATIONS) {
-                        violations.add("row " + recordCount + ": " + violation);
+            PageReadStore rowGroup;
+            while ((rowGroup = reader.readNextRowGroup()) != null) {
+                final ItemColumns items = new ItemColumns(rowGroup, projection, createdBy);
+                for (long row = 0; row < rowGroup.getRowCount(); row++) {
+                    recordCount++;
+                    final String violation = validateItem(items.next());
+                    if (violation != null) {
+                        invalidCount++;
+                        // Keep counting past the cap so invalid.count stays accurate.
+                        if (violations.size() < MAX_REPORTED_VIOLATIONS) {
+                            violations.add("row " + recordCount + ": " + violation);
+                        }
                     }
                 }
             }
-        }
 
-        return ValidationResult.of(recordCount, invalidCount, violations);
-    }
-
-    /** Reads the footer only. No column data is decompressed. */
-    private MessageType readSchema(final InputFile inputFile) throws IOException {
-        final ParquetReadOptions options = ParquetReadOptions.builder(parquetConfiguration).build();
-        try (ParquetFileReader reader = ParquetFileReader.open(inputFile, options)) {
-            return reader.getFileMetaData().getSchema();
+            return ValidationResult.of(recordCount, invalidCount, violations);
         }
     }
 

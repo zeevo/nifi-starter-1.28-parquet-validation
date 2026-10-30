@@ -41,9 +41,8 @@
         <slf4j.version>2.0.16</slf4j.version>
 
         <!--
-          Parquet 1.17.1 rather than the 1.13.1 NiFi 1.28.1's own parquet bundle ships:
-          parquet-avro at or below 1.15.0 carries CVE-2025-30065 (schema parsing can load
-          arbitrary classes). 1.17.1 also targets Java 11, matching this build.
+          Parquet 1.17.1 rather than the 1.13.1 NiFi 1.28.1's own parquet bundle ships: 1.17.1
+          targets Java 11, matching this build.
         -->
         <parquet.version>1.17.1</parquet.version>
         <hadoop.version>3.4.1</hadoop.version>
@@ -124,7 +123,7 @@
             </dependency>
             <!--
               provided for the same reason as nifi-api: NiFi supplies slf4j-api from its own
-              lib/ directory. Parquet, Avro and Hadoop all pull it at compile scope, so without
+              lib/ directory. Parquet and Hadoop both pull it at compile scope, so without
               this it would be bundled into the NAR and defeat NiFi's logging routing.
             -->
             <dependency>
@@ -149,7 +148,7 @@
             -->
             <dependency>
                 <groupId>org.apache.parquet</groupId>
-                <artifactId>parquet-avro</artifactId>
+                <artifactId>parquet-hadoop</artifactId>
                 <version>${parquet.version}</version>
             </dependency>
             <dependency>
