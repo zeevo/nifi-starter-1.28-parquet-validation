@@ -79,6 +79,8 @@ import org.junit.jupiter.api.io.TempDir;
  *   spark-array-id.parquet          id is a 3-level list
  *   spark-struct-id.parquet         id is a struct
  *   spark-invalid.parquet           one passing row, then one row breaking each rule
+ *   spark-binary-text.parquet       name and status are unannotated BINARY, no other columns added:
+ *                                   (1,"   ","ACTIVE"), (2,"carol","BOGUS")
  *   spark-double-id.parquet         id is a double, no other columns added
  *   spark-boolean-id.parquet        id is a boolean, no other columns added
  *   spark-int-name.parquet          name is INT32, no other columns added
@@ -284,6 +286,15 @@ public class ValidateParquetTest {
         assertEquals("row 2: id must be positive; row 3: name is blank; "
                         + "row 4: status 'BOGUS' is not an allowed value; row 5: id is null; "
                         + "row 6: name and status are both null",
+                out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
+    }
+
+    /** Some writers store strings with no annotation, as spark.sql.parquet.binaryAsString allows for. */
+    @Test
+    public void testSparkUnannotatedBinaryIsReadAsText() throws IOException {
+        final MockFlowFile out = runFixture("spark-binary-text.parquet", ValidateParquet.REL_INVALID);
+
+        assertEquals("row 1: name is blank; row 2: status 'BOGUS' is not an allowed value",
                 out.getAttribute(ValidateParquet.VIOLATIONS_ATTRIBUTE));
     }
 
